@@ -1,0 +1,80 @@
+{
+  "group_a": {
+    "method": "LLM file tree guessing (LocatorExpert)",
+    "file_accuracy": 100.0,
+    "func_accuracy": 50.0,
+    "results": [
+      {
+        "case_id": 1,
+        "file_hit": true,
+        "func_hit": true,
+        "elapsed_s": 10.8
+      },
+      {
+        "case_id": 2,
+        "file_hit": true,
+        "func_hit": true,
+        "elapsed_s": 1.1
+      },
+      {
+        "case_id": 3,
+        "file_hit": true,
+        "func_hit": true,
+        "elapsed_s": 2.3
+      },
+      {
+        "case_id": 4,
+        "file_hit": true,
+        "func_hit": false,
+        "elapsed_s": 2.4
+      },
+      {
+        "case_id": 5,
+        "file_hit": true,
+        "func_hit": false,
+        "elapsed_s": 2.2
+      },
+      {
+        "case_id": 6,
+        "file_hit": true,
+        "func_hit": true,
+        "elapsed_s": 2.4
+      },
+      {
+        "case_id": 7,
+        "file_hit": true,
+        "func_hit": false,
+        "elapsed_s": 2.5
+      },
+      {
+        "case_id": 8,
+        "file_hit": true,
+        "func_hit": true,
+        "elapsed_s": 2.3
+      },
+      {
+        "case_id": 9,
+        "file_hit": true,
+        "func_hit": false,
+        "elapsed_s": 1.3
+      },
+      {
+        "case_id": 10,
+        "file_hit": true,
+        "func_hit": false,
+        "elapsed_s": 1.2
+      }
+    ]
+  },
+  "group_b": {
+    "method": "tree-sitter call graph (stub)",
+    "file_accuracy": null,
+    "results": null
+  },
+  "comparison": {
+    "improvement_pct": null,
+    "flex4_triggered": null,
+    "note": "B组为stub，待tree-sitter安装后重跑"
+  },
+  "total_cases": 10
+}
