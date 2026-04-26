@@ -177,8 +177,8 @@ kaiwu/
 - [x] 拉更大模型验证（gemma4:e2b Gate 100%准确率，E2E通过）
 - [x] Windows 兼容性（GBK编码修复）
 - [x] Gate codegen/locator_repair 边界优化（prompt 明确描述，5/5 边界 case 通过）
-- [ ] 非Python语言支持验证（JS/Go/Rust）
-- [ ] 性能优化：reasoning模型thinking开销过大（gemma4 64.9s vs gemma3 5.7s）
+- [x] 性能优化：reasoning模型think=false，gemma4 64.9s→19.3s（3.4x提速）
+- [x] 非Python语言支持（JS/Go/Rust regex提取验证通过）
 
 ### 已知限制
 
