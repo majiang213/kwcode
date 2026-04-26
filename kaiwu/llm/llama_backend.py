@@ -26,7 +26,7 @@ class LLMBackend:
     """Unified LLM interface supporting llama.cpp native and Ollama HTTP."""
 
     # Models known to use thinking/reasoning tokens that consume num_predict budget
-    REASONING_MODELS = {"deepseek-r1", "qwq", "qwen3"}  # qwen3 has /think mode
+    REASONING_MODELS = {"deepseek-r1", "qwq", "qwen3", "gemma4"}  # thinking/reasoning models
     # Multiplier for num_predict when using reasoning models
     REASONING_TOKEN_MULTIPLIER = 8
 
