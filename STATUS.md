@@ -20,6 +20,9 @@ MVP 流水线 + 6 步搜索增强全部跑通。
 | V2 OpenHands集成 | 跳过，走 FLEX-1 自实现 | ToolExecutor 5个工具已完成 |
 | V3 Locator精度 | 文件级 90%，函数级 20% | 函数级已加 few-shot 优化，待更大模型验证 |
 | V4 搜索模块 | 意图4/4, DDG 4/4, Fetch 3/4, 压缩4/4 | trafilatura+bs4, 耗时略超15s(LLM瓶颈) |
+| E2E 单文件 | 通过 | gemma3:4b 5.7s / gemma4:e2b 64.9s，5/5 测试 |
+| E2E 多文件 | 通过 | gemma3:4b 7.7s，password leak 跨2文件，3/3 测试 |
+| gemma4:e2b Gate | 100% 类型准确率（含 office） | 比 gemma3:4b 的 67% 大幅提升，但慢 10x |
 
 ---
 
@@ -171,8 +174,11 @@ kaiwu/
 - [x] 符号索引辅助文件定位（跨文件 bug 修复验证通过）
 - [x] 多文件修改 E2E（password leak 跨 models.py+service.py，3/3 测试通过）
 - [x] codegen 流水线验证（纯生成通过，但写到 new_code.py 而非目标文件）
-- [ ] 拉 qwen3-8b 跑完整验证
-- [ ] Windows 兼容性完善（路径分隔符、编码等）
+- [x] 拉更大模型验证（gemma4:e2b Gate 100%准确率，E2E通过）
+- [x] Windows 兼容性（GBK编码修复）
+- [ ] Gate codegen/locator_repair 边界优化（"在已有文件添加函数"应走locator_repair）
+- [ ] 非Python语言支持验证（JS/Go/Rust）
+- [ ] 性能优化：reasoning模型thinking开销过大（gemma4 64.9s vs gemma3 5.7s）
 
 ### 已知限制
 
