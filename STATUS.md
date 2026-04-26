@@ -271,9 +271,11 @@ kaiwu/
 - [x] 红线约束代码review（10/10 CORE 全部 PASS）
 - [x] V5 AST Locator验证（A组函数50% vs B组100%，+50pp，AST值得集成）
 - [x] V6 专家生成质量验证（gemma4:e2b 3/3 PASS，gemma3:4b 1/3）
-- [x] 预置专家抽样验证（BugFix 5/5=100%, TestGen 3/5=60%，codegen流水线待优化）
+- [x] 预置专家抽样验证（BugFix 5/5=100%, TestGen gemma4 3/5=60%）
+- [x] CLI补全（--no-search, memory --reset）
 
 ### 已知限制
 
+- TestGenExpert 受限于小模型生成测试代码质量，gemma4:e2b 60%
 - V3 验证脚本的临时目录路径匹配有问题，不影响真实场景
-- V5/V6 验证脚本已就绪，需要 Ollama 在线才能运行
+- 跨设备迁移(backup/restore)和SQLite跨session查询为后续优化项
