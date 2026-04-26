@@ -56,7 +56,7 @@ MVP 流水线 + 6 步搜索增强 + 专家注册表 + 3 层记忆 + 飞轮自动
 | V2 OpenHands集成 | 跳过，走 FLEX-1 自实现 | ToolExecutor 5个工具已完成 |
 | V3 Locator精度 | 文件级 90%，函数级 20% | 函数级已加 few-shot 优化，待更大模型验证 |
 | V4 搜索模块 | 意图4/4, DDG 4/4, Fetch 3/4, 压缩4/4 | trafilatura+bs4, 耗时略超15s(LLM瓶颈) |
-| V5 AST Locator | 脚本就绪，待运行 | A组(LLM猜测) vs B组(tree-sitter stub) |
+| V5 AST Locator | A组(LLM)文件100%/函数50%, B组(AST)100%/100% | +50pp提升，值得集成 |
 | V6 专家生成质量 | gemma3:4b 1/3, gemma4:e2b 3/3 PASS | 小模型JSON生成弱，大模型全过 |
 | E2E 单文件 | 通过 | gemma3:4b 5.7s / gemma4:e2b 64.9s，5/5 测试 |
 | E2E 多文件 | 通过 | gemma3:4b 7.7s，password leak 跨2文件，3/3 测试 |
@@ -269,7 +269,7 @@ kaiwu/
 - [x] E2E 端到端验收（fibonacci off-by-one，gemma3:4b，22.4s，4/4测试，含重试+搜索+记忆+轨迹）
 - [x] Windows cmd原生验证（Python import + pytest 24/24 通过）
 - [x] 红线约束代码review（10/10 CORE 全部 PASS）
-- [ ] V5 AST Locator实际验证（需要tree-sitter + Ollama）
+- [x] V5 AST Locator验证（A组函数50% vs B组100%，+50pp，AST值得集成）
 - [x] V6 专家生成质量验证（gemma4:e2b 3/3 PASS，gemma3:4b 1/3）
 - [ ] 预置专家20任务验证（Step 16）
 

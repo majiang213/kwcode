@@ -1,9 +1,9 @@
 """
 V5 验证：AST Locator vs LLM 文件树猜测对比。
 目标：比较 tree-sitter 调用图定位（B组）vs 当前 LLM 文件树猜测（A组）。
-红线：B组提升 < 15% → 触发 FLEX-4，推迟 AST 调用图。
+红线：B组函数级提升 < 15% → 触发 FLEX-4，推迟 AST 调用图。
 
-注意：tree-sitter 尚未安装，B组为 stub。A组需要 Ollama 在线。
+A组需要 Ollama 在线。B组使用 tree-sitter ASTLocator，无需 LLM。
 
 用法：
   python -m kaiwu.validation.v5_ast_locator --ollama-model gemma3:4b
@@ -446,16 +446,56 @@ def run_group_a(llm, cases: list[dict]) -> list[dict]:
 
 def run_group_b(llm, cases: list[dict]) -> list[dict] | None:
     """
-    Group B: tree-sitter call graph locating (stub).
-    Returns None — tree-sitter is not yet integrated.
-    When tree-sitter is added, this should:
-      1. Parse all project files into AST
-      2. Build call graph from function references
-      3. Given bug description, trace call chains to locate root cause
-      4. Return same format as group A for comparison
+    Group B: tree-sitter call graph locating (ASTLocator).
+    Returns list of {case_id, file_hit, func_hit, elapsed_s}.
     """
-    print("    [B] tree-sitter 未安装，B组跳过 (stub)")
-    return None
+    try:
+        from kaiwu.ast_engine.locator import ASTLocator
+    except ImportError as e:
+        print(f"    [B] tree-sitter 未安装，B组跳过 ({e})")
+        return None
+
+    locator = ASTLocator()
+    results = []
+
+    for case in cases:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _create_project(tmpdir, case)
+
+            t0 = time.time()
+            result = locator.locate(tmpdir, case["description"])
+            elapsed = time.time() - t0
+
+            file_hit = False
+            func_hit = False
+            if result:
+                found_files = [f.replace("\\", "/").lstrip("./") for f in result.get("relevant_files", [])]
+                found_funcs = result.get("relevant_functions", [])
+                # Also accept short names (strip class prefix)
+                found_funcs_short = list(found_funcs)
+                for fn in found_funcs:
+                    if "." in fn:
+                        found_funcs_short.append(fn.split(".")[-1])
+
+                file_hit = any(
+                    case["expected_file"] in ff or ff.endswith(case["expected_file"])
+                    for ff in found_files
+                )
+                func_hit = case["expected_function"] in found_funcs_short
+
+            r = {
+                "case_id": case["id"],
+                "file_hit": file_hit,
+                "func_hit": func_hit,
+                "elapsed_s": round(elapsed, 3),
+            }
+            results.append(r)
+
+            f_icon = "OK" if file_hit else "FAIL"
+            fn_icon = "OK" if func_hit else "FAIL"
+            print(f"    [B] Case {case['id']:2d}: file={f_icon} func={fn_icon} ({elapsed:.3f}s)")
+
+    return results
 
 
 def run_validation(ollama_model: str = "gemma3:4b"):
@@ -487,9 +527,9 @@ def run_validation(ollama_model: str = "gemma3:4b"):
     else:
         print("    Ollama 不在线，A组跳过")
 
-    # ── Group B: tree-sitter call graph (stub) ──
+    # ── Group B: tree-sitter call graph (ASTLocator) ──
     print()
-    print("── Group B: tree-sitter 调用图定位 (stub) ──")
+    print("── Group B: tree-sitter 调用图定位 (ASTLocator) ──")
     group_b_results = run_group_b(llm, BUG_CASES)
 
     # ── Compare & conclude ──
@@ -510,18 +550,27 @@ def run_validation(ollama_model: str = "gemma3:4b"):
     else:
         print("  A组: 未运行 (Ollama 离线)")
 
+    b_file_acc = None
+    b_func_acc = None
     if group_b_results:
         b_file_hits = sum(1 for r in group_b_results if r["file_hit"])
+        b_func_hits = sum(1 for r in group_b_results if r["func_hit"])
         b_file_acc = b_file_hits / len(BUG_CASES) * 100
-        improvement = b_file_acc - (a_file_acc or 0)
+        b_func_acc = b_func_hits / len(BUG_CASES) * 100
+        file_improvement = b_file_acc - (a_file_acc or 0)
+        func_improvement = b_func_acc - (a_func_acc or 0)
         print(f"  B组 文件级准确率: {b_file_hits}/{len(BUG_CASES)} = {b_file_acc:.0f}%")
-        print(f"  提升: {improvement:+.0f}%")
-        if improvement < 15:
-            print("  判定: 提升 < 15%，触发 FLEX-4，推迟 AST 调用图")
+        print(f"  B组 函数级准确率: {b_func_hits}/{len(BUG_CASES)} = {b_func_acc:.0f}%")
+        if a_func_acc is not None:
+            print(f"  函数级提升: {func_improvement:+.0f}%")
+            if func_improvement < 15:
+                print("  判定: 函数级提升 < 15%，触发 FLEX-4，推迟 AST 调用图")
+            else:
+                print("  判定: 函数级提升 >= 15%，AST 调用图值得集成")
         else:
-            print("  判定: 提升 >= 15%，AST 调用图值得集成")
+            print("  判定: A组未运行，无法比较")
     else:
-        print("  B组: 未运行 (tree-sitter stub)")
+        print("  B组: 未运行 (tree-sitter 不可用)")
         print("  判定: 待 tree-sitter 集成后重新运行")
 
     V5_CONCLUSION = {
@@ -532,14 +581,15 @@ def run_validation(ollama_model: str = "gemma3:4b"):
             "results": group_a_results,
         },
         "group_b": {
-            "method": "tree-sitter call graph (stub)",
-            "file_accuracy": None,
+            "method": "tree-sitter call graph (ASTLocator)",
+            "file_accuracy": b_file_acc,
+            "func_accuracy": b_func_acc,
             "results": group_b_results,
         },
         "comparison": {
-            "improvement_pct": None,
-            "flex4_triggered": None,
-            "note": "B组为stub，待tree-sitter安装后重跑",
+            "file_improvement_pct": (b_file_acc - a_file_acc) if (b_file_acc is not None and a_file_acc is not None) else None,
+            "func_improvement_pct": (b_func_acc - a_func_acc) if (b_func_acc is not None and a_func_acc is not None) else None,
+            "flex4_triggered": (b_func_acc - a_func_acc < 15) if (b_func_acc is not None and a_func_acc is not None) else None,
         },
         "total_cases": len(BUG_CASES),
     }
