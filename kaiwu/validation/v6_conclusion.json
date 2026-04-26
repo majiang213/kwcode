@@ -1,0 +1,104 @@
+{
+  "status": "completed",
+  "model": "gemma4:e2b",
+  "groups_passed": 3,
+  "groups_total": 3,
+  "overall_pass": true,
+  "groups": {
+    "fastapi_crud": {
+      "label": "FastAPI CRUD endpoint",
+      "generated": true,
+      "expert_name": "FastAPICodeGeneratorExpert",
+      "expert_keywords": [
+        "FastAPI",
+        "CRUD接口",
+        "API实现",
+        "数据管理",
+        "模型生成"
+      ],
+      "expert_pipeline": [
+        "generator",
+        "verifier"
+      ],
+      "system_prompt_len": 604,
+      "structure_checks": {
+        "has_name": true,
+        "has_trigger_keywords": true,
+        "has_system_prompt": true,
+        "has_pipeline": true,
+        "pipeline_valid": true,
+        "system_prompt_nonempty": true,
+        "system_prompt_has_content": true,
+        "confidence_reasonable": true,
+        "all_passed": true
+      },
+      "keyword_coverage": 0.6,
+      "elapsed_s": 54.7,
+      "passed": true
+    },
+    "pytest_fixture": {
+      "label": "pytest fixture",
+      "generated": true,
+      "expert_name": "PytestFixtureGenerator",
+      "expert_keywords": [
+        "pytest fixture",
+        "pytest conftest",
+        "test setup",
+        "fixture creation",
+        "test teardown",
+        "mocking fixture"
+      ],
+      "expert_pipeline": [
+        "generator",
+        "verifier"
+      ],
+      "system_prompt_len": 592,
+      "structure_checks": {
+        "has_name": true,
+        "has_trigger_keywords": true,
+        "has_system_prompt": true,
+        "has_pipeline": true,
+        "pipeline_valid": true,
+        "system_prompt_nonempty": true,
+        "system_prompt_has_content": true,
+        "confidence_reasonable": true,
+        "all_passed": true
+      },
+      "keyword_coverage": 1.0,
+      "elapsed_s": 31.1,
+      "passed": true
+    },
+    "db_migration": {
+      "label": "database migration",
+      "generated": true,
+      "expert_name": "DatabaseMigrationCodegenExpert",
+      "expert_keywords": [
+        "写迁移脚本",
+        "Alembic",
+        "数据库迁移",
+        "schema 变更",
+        "表结构修改",
+        "模型迁移"
+      ],
+      "expert_pipeline": [
+        "generator",
+        "verifier"
+      ],
+      "system_prompt_len": 592,
+      "structure_checks": {
+        "has_name": true,
+        "has_trigger_keywords": true,
+        "has_system_prompt": true,
+        "has_pipeline": true,
+        "pipeline_valid": true,
+        "system_prompt_nonempty": true,
+        "system_prompt_has_content": true,
+        "confidence_reasonable": true,
+        "all_passed": true
+      },
+      "keyword_coverage": 0.4,
+      "elapsed_s": 32.6,
+      "passed": true
+    }
+  }
+}
