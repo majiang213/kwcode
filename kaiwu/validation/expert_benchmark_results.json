@@ -1,43 +1,43 @@
 {
   "status": "completed",
-  "model": "gemma3:4b",
+  "model": "gemma4:e2b",
   "overall_pass": false,
   "experts": {
     "TestGenExpert": {
       "passed": 3,
       "total": 5,
       "success_rate": 0.6,
-      "avg_latency_s": 14.12,
+      "avg_latency_s": 82.65,
       "threshold_met": false,
       "tasks": [
         {
           "name": "calc_tests",
-          "success": false,
-          "elapsed_s": 29.51,
-          "error": "Max retries (3) exceeded"
+          "success": true,
+          "elapsed_s": 49.8,
+          "error": null
         },
         {
           "name": "string_utils_tests",
-          "success": true,
-          "elapsed_s": 3.92,
-          "error": null
-        },
-        {
-          "name": "sort_tests",
           "success": false,
-          "elapsed_s": 27.8,
+          "elapsed_s": 105.67,
           "error": "Max retries (3) exceeded"
         },
         {
-          "name": "filepath_tests",
+          "name": "sort_tests",
           "success": true,
-          "elapsed_s": 4.15,
+          "elapsed_s": 29.58,
           "error": null
+        },
+        {
+          "name": "filepath_tests",
+          "success": false,
+          "elapsed_s": 141.84,
+          "error": "Max retries (3) exceeded"
         },
         {
           "name": "validator_tests",
           "success": true,
-          "elapsed_s": 5.24,
+          "elapsed_s": 86.38,
           "error": null
         }
       ]

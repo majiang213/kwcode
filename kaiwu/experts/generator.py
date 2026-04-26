@@ -49,6 +49,24 @@ GENERATOR_NEWFILE_PROMPT = """你是代码生成专家。根据任务描述生�
 1. 只输出代码，不要解释
 2. 不要用markdown代码块包裹"""
 
+GENERATOR_TEST_PROMPT = """你是测试生成专家。为下面的代码生成 pytest 单元测试。
+
+源代码（来自 {source_file}）：
+```
+{source_code}
+```
+
+任务描述：{task_description}
+
+{search_context}
+
+请生成完整的 pytest 测试文件。要求：
+1. 在文件开头 import 被测模块（使用相对路径或 sys.path）
+2. 每个函数至少2个测试用例（正常+边界）
+3. 使用 assert 语句
+4. 只输出代码，不要解释
+5. 不要用markdown代码块包裹"""
+
 
 class GeneratorExpert:
     """Generates code patches. Original is read from file, LLM only generates modified."""
@@ -73,6 +91,10 @@ class GeneratorExpert:
         if not files:
             # No locator output — pure codegen task
             return self._run_codegen(ctx)
+
+        # Detect test generation tasks — need to CREATE test file, not modify source
+        if self._is_test_generation_task(ctx):
+            return self._run_test_generation(ctx, files)
 
         # For each file+function pair, extract original and generate modified
         # Deduplicate: only patch each (file, function) once
@@ -192,6 +214,79 @@ class GeneratorExpert:
         result = {
             "patches": [{"file": "new_code.py", "original": "", "modified": code}],
             "explanation": "Generated new code",
+        }
+        ctx.generator_output = result
+        return result
+
+    def _is_test_generation_task(self, ctx: TaskContext) -> bool:
+        """Detect if the task is about generating tests (not modifying source)."""
+        keywords = ["生成测试", "写测试", "单元测试", "test", "pytest", "测试用例", "添加测试"]
+        task_lower = ctx.user_input.lower()
+        gate_type = ctx.gate_result.get("expert_type", "")
+        expert_name = ctx.gate_result.get("expert_name", "")
+        if expert_name == "TestGenExpert":
+            return True
+        if gate_type == "codegen" and any(kw in task_lower for kw in keywords):
+            return True
+        return any(kw in task_lower for kw in keywords[:3])  # Strong Chinese signals
+
+    def _run_test_generation(self, ctx: TaskContext, source_files: list[str]) -> Optional[dict]:
+        """Generate a new test file for the given source files."""
+        import os
+
+        search_ctx = ""
+        if ctx.search_results:
+            search_ctx = f"参考资料：\n{ctx.search_results}"
+
+        # Read source files to provide as context
+        source_code_parts = []
+        primary_source = None
+        for fpath in source_files[:3]:
+            if "test" in fpath.lower():
+                continue
+            content = self.tools.read_file(fpath) if self.tools else ""
+            if content and not content.startswith("[ERROR]"):
+                source_code_parts.append(f"# {fpath}\n{content}")
+                if primary_source is None:
+                    primary_source = fpath
+
+        if not source_code_parts:
+            return self._run_codegen(ctx)
+
+        source_code = "\n\n".join(source_code_parts)
+
+        prompt = GENERATOR_TEST_PROMPT.format(
+            source_file=primary_source or "source",
+            source_code=source_code[:4000],
+            task_description=ctx.user_input,
+            search_context=search_ctx,
+        )
+
+        raw = self.llm.generate(prompt=prompt, max_tokens=2048, temperature=0.0)
+        code = self._clean_code_output(raw)
+        if not code:
+            return None
+
+        # Determine test file path
+        test_dir = os.path.join(ctx.project_root, "tests")
+        if primary_source:
+            base = os.path.splitext(os.path.basename(primary_source))[0]
+            test_file = os.path.join("tests", f"test_{base}.py")
+        else:
+            test_file = os.path.join("tests", "test_generated.py")
+
+        # Ensure tests/ dir and __init__.py exist
+        if self.tools:
+            abs_test_dir = os.path.join(ctx.project_root, "tests")
+            os.makedirs(abs_test_dir, exist_ok=True)
+            init_path = os.path.join(abs_test_dir, "__init__.py")
+            if not os.path.exists(init_path):
+                with open(init_path, "w", encoding="utf-8") as f:
+                    pass
+
+        result = {
+            "patches": [{"file": test_file, "original": "", "modified": code}],
+            "explanation": f"Generated test file for {primary_source}",
         }
         ctx.generator_output = result
         return result
