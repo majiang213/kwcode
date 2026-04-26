@@ -28,6 +28,8 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=False,
 )
+expert_app = typer.Typer(name="expert", help="专家管理")
+app.add_typer(expert_app)
 console = Console()
 
 # ── Status display ────────────────────────────────────────────
@@ -52,7 +54,7 @@ def _status_callback(stage: str, detail: str):
 # ── Pipeline builder ──────────────────────────────────────────
 
 def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose):
-    """Construct the full pipeline. Returns (gate, orchestrator, memory)."""
+    """Construct the full pipeline. Returns (gate, orchestrator, memory, registry)."""
     from kaiwu.llm.llama_backend import LLMBackend
     from kaiwu.core.gate import Gate
     from kaiwu.core.orchestrator import PipelineOrchestrator
@@ -63,6 +65,8 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     from kaiwu.experts.office_handler import OfficeHandlerExpert
     from kaiwu.tools.executor import ToolExecutor
     from kaiwu.memory.kaiwu_md import KaiwuMemory
+    from kaiwu.registry import ExpertRegistry
+    from kaiwu.flywheel.trajectory_collector import TrajectoryCollector
 
     llm = LLMBackend(
         model_path=model_path,
@@ -72,7 +76,12 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     )
     tools = ToolExecutor(project_root=project_root)
     memory = KaiwuMemory()
-    gate = Gate(llm=llm)
+
+    registry = ExpertRegistry()
+    registry.load_builtin()
+    registry.load_user()
+
+    gate = Gate(llm=llm, registry=registry)
 
     locator = LocatorExpert(llm=llm, tool_executor=tools)
     generator = GeneratorExpert(llm=llm, tool_executor=tools)
@@ -80,12 +89,15 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
     search = SearchAugmentorExpert(llm=llm)
     office = OfficeHandlerExpert()
 
+    trajectory_collector = TrajectoryCollector()
+
     orchestrator = PipelineOrchestrator(
         locator=locator, generator=generator, verifier=verifier,
         search_augmentor=search, office_handler=office,
-        tool_executor=tools, memory=memory,
+        tool_executor=tools, memory=memory, registry=registry,
+        trajectory_collector=trajectory_collector,
     )
-    return gate, orchestrator, memory
+    return gate, orchestrator, memory, registry
 
 
 # ── Single task execution ─────────────────────────────────────
@@ -104,9 +116,19 @@ def _run_task(task, gate, orchestrator, memory, project_root, verbose, plan=Fals
     et = gate_result["expert_type"]
     diff = gate_result["difficulty"]
     summary = gate_result.get("task_summary", "")
-    seq = EXPERT_SEQUENCES.get(et, ["generator", "verifier"])
+    route = gate_result.get("route_type", "general")
+    expert_name = gate_result.get("expert_name")
+
+    # Use expert's pipeline if from registry, else fall back to orchestrator sequences
+    if route == "expert_registry" and "pipeline" in gate_result:
+        seq = gate_result["pipeline"]
+    else:
+        seq = EXPERT_SEQUENCES.get(et, ["generator", "verifier"])
     seq_display = " -> ".join(s.capitalize() for s in seq)
 
+    if expert_name:
+        conf = gate_result.get("confidence", 0)
+        console.print(f"  [bold]{expert_name}[/bold] ({route}) conf={conf:.2f}")
     console.print(f"  [bold]{et}[/bold] | {diff} | {summary}")
     console.print(f"  [dim]{seq_display}[/dim]")
 
@@ -157,13 +179,14 @@ def _run_task(task, gate, orchestrator, memory, project_root, verbose, plan=Fals
 # ── REPL ──────────────────────────────────────────────────────
 
 REPL_COMMANDS = {
-    "/help":   "显示帮助",
-    "/memory": "查看项目记忆 (KAIWU.md)",
-    "/init":   "初始化 KAIWU.md",
-    "/model":  "切换模型 (用法: /model qwen3-8b)",
-    "/cd":     "切换项目目录 (用法: /cd /path/to/project)",
-    "/plan":   "下一个任务先显示计划再执行",
-    "/exit":   "退出",
+    "/help":    "显示帮助",
+    "/memory":  "查看项目记忆 (KAIWU.md)",
+    "/init":    "初始化 KAIWU.md",
+    "/model":   "切换模型 (用法: /model qwen3-8b)",
+    "/cd":      "切换项目目录 (用法: /cd /path/to/project)",
+    "/experts": "列出已注册专家",
+    "/plan":    "下一个任务先显示计划再执行",
+    "/exit":    "退出",
 }
 
 
@@ -172,13 +195,13 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
     from kaiwu.memory.kaiwu_md import KaiwuMemory
 
     console.print(Panel(
-        f"[bold]Kaiwu v0.3[/bold]  交互模式\n"
+        f"[bold]Kaiwu v0.4[/bold]  交互模式\n"
         f"模型: {ollama_model}  项目: {project_root}\n"
         f"输入任务开始，/help 查看命令，/exit 退出",
         border_style="cyan",
     ))
 
-    gate, orchestrator, memory = _build_pipeline(
+    gate, orchestrator, memory, registry = _build_pipeline(
         model_path=model_path,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
@@ -230,7 +253,7 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                     ollama_model = arg.strip()
                     console.print(f"  [green]模型切换为: {ollama_model}[/green]")
                     console.print("  [dim]重建流水线...[/dim]")
-                    gate, orchestrator, memory = _build_pipeline(
+                    gate, orchestrator, memory, registry = _build_pipeline(
                         model_path=model_path,
                         ollama_url=ollama_url,
                         ollama_model=ollama_model,
@@ -248,7 +271,7 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                         project_root = new_root
                         console.print(f"  [green]项目切换为: {project_root}[/green]")
                         # 重建 tools（project_root 变了）
-                        gate, orchestrator, memory = _build_pipeline(
+                        gate, orchestrator, memory, registry = _build_pipeline(
                             model_path=model_path,
                             ollama_url=ollama_url,
                             ollama_model=ollama_model,
@@ -257,6 +280,17 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                         )
                     else:
                         console.print(f"  [red]目录不存在: {new_root}[/red]")
+
+            elif cmd == "/experts":
+                experts = registry.list_experts()
+                console.print(f"  [cyan]已注册专家: {len(experts)}[/cyan]")
+                for e in experts:
+                    lc = e.get("lifecycle", "new")
+                    perf = e.get("performance", {})
+                    cnt = perf.get("task_count", 0)
+                    sr = perf.get("success_rate", 0.0)
+                    kws = ", ".join(e["trigger_keywords"][:4])
+                    console.print(f"  [bold]{e['name']}[/bold] [{lc}] tasks={cnt} sr={sr:.0%} kw=[{kws}]")
 
             elif cmd == "/plan":
                 plan_next = True
@@ -332,11 +366,11 @@ def main(
 
     # ── Single task mode ──
     console.print(Panel(
-        f"[bold]Kaiwu v0.3[/bold] | {ollama_model} | {project_root}",
+        f"[bold]Kaiwu v0.4[/bold] | {ollama_model} | {project_root}",
         border_style="cyan",
     ))
 
-    gate, orchestrator, memory = _build_pipeline(
+    gate, orchestrator, memory, registry = _build_pipeline(
         model_path=model_path,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
@@ -366,6 +400,189 @@ def cmd_memory(
     from kaiwu.memory.kaiwu_md import KaiwuMemory
     content = KaiwuMemory().show(os.path.abspath(project_dir))
     Console().print(Panel(content, title="KAIWU.md", border_style="blue"))
+
+
+# ── Expert management subcommands ────────────────────────────
+
+def _get_registry():
+    """Build a standalone registry for CLI expert commands."""
+    from kaiwu.registry import ExpertRegistry
+    reg = ExpertRegistry()
+    reg.load_builtin()
+    reg.load_user()
+    return reg
+
+
+@expert_app.command("list")
+def expert_list(
+    expert_type: str = typer.Argument(None, help="按类型过滤 (builtin/custom)"),
+):
+    """列出已安装专家。"""
+    reg = _get_registry()
+    experts = reg.list_experts(expert_type=expert_type)
+    if not experts:
+        console.print("  没有已安装的专家。")
+        return
+    console.print(f"  [cyan]已安装专家: {len(experts)}[/cyan]")
+    for e in experts:
+        lc = e.get("lifecycle", "new")
+        perf = e.get("performance", {})
+        cnt = perf.get("task_count", 0)
+        sr = perf.get("success_rate", 0.0)
+        kws = ", ".join(e["trigger_keywords"][:4])
+        console.print(f"  [bold]{e['name']}[/bold] v{e.get('version','?')} [{lc}] tasks={cnt} sr={sr:.0%} kw=[{kws}]")
+
+
+@expert_app.command("info")
+def expert_info(name: str = typer.Argument(..., help="专家名称")):
+    """查看专家详情。"""
+    import yaml as _yaml
+    reg = _get_registry()
+    expert = reg.get(name)
+    if not expert:
+        console.print(f"  [red]未找到专家: {name}[/red]")
+        raise typer.Exit(1)
+    data = {k: v for k, v in expert.items() if not k.startswith("_")}
+    console.print(Panel(
+        _yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False).rstrip(),
+        title=name,
+        border_style="cyan",
+    ))
+
+
+@expert_app.command("export")
+def expert_export(
+    name: str = typer.Argument(..., help="专家名称"),
+    output: str = typer.Option(".", "--output", "-o", help="输出目录"),
+):
+    """导出专家为 .kwx 包。"""
+    from kaiwu.registry.expert_packager import ExpertPackager
+    reg = _get_registry()
+    try:
+        path = ExpertPackager.export(reg, name, output)
+        console.print(f"  [green]已导出: {path}[/green]")
+    except Exception as e:
+        console.print(f"  [red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@expert_app.command("install")
+def expert_install(path: str = typer.Argument(..., help=".kwx 文件路径或 URL")):
+    """安装专家包 (.kwx 文件或 URL)。"""
+    from kaiwu.registry.expert_packager import ExpertPackager
+    reg = _get_registry()
+    try:
+        name = ExpertPackager.install(path, reg)
+        console.print(f"  [green]已安装专家: {name}[/green]")
+    except Exception as e:
+        console.print(f"  [red]安装失败: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@expert_app.command("remove")
+def expert_remove(name: str = typer.Argument(..., help="专家名称")):
+    """删除已安装专家。"""
+    from kaiwu.registry.expert_packager import ExpertPackager
+    reg = _get_registry()
+    try:
+        ExpertPackager.remove(name, reg)
+        console.print(f"  [green]已删除专家: {name}[/green]")
+    except Exception as e:
+        console.print(f"  [red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+@expert_app.command("create")
+def expert_create(name: str = typer.Argument(..., help="新专家名称")):
+    """创建新专家模板。"""
+    from kaiwu.registry.expert_packager import ExpertPackager
+    try:
+        path = ExpertPackager.create_template(name)
+        console.print(f"  [green]已创建模板: {path}[/green]")
+        console.print("  编辑该文件以自定义你的专家。")
+    except FileExistsError as e:
+        console.print(f"  [yellow]{e}[/yellow]")
+    except Exception as e:
+        console.print(f"  [red]{e}[/red]")
+        raise typer.Exit(1)
+
+
+# ── Status command ───────────────────────────────────────────
+
+@app.command("status")
+def cmd_status(
+    model: str = typer.Option(None, "--model", "-m", help="Ollama模型名称"),
+    ollama_url: str = typer.Option("http://localhost:11434", "--ollama-url", help="Ollama服务地址"),
+    project_dir: str = typer.Option(".", "--project", "-d", help="项目根目录"),
+):
+    """显示模型/专家/记忆状态。"""
+    from kaiwu.registry import ExpertRegistry
+    from kaiwu.memory.kaiwu_md import KaiwuMemory
+
+    project_root = os.path.abspath(project_dir)
+    ollama_model = model or "qwen3-8b"
+
+    # Registry
+    reg = ExpertRegistry()
+    reg.load_builtin()
+    reg.load_user()
+    experts = reg.list_experts()
+    builtin = [e for e in experts if e.get("type") == "builtin"]
+    custom = [e for e in experts if e.get("type") != "builtin"]
+
+    # Memory
+    mem = KaiwuMemory()
+    has_memory = os.path.isfile(os.path.join(project_root, "KAIWU.md"))
+
+    # Ollama connectivity
+    ollama_ok = False
+    try:
+        import httpx
+        resp = httpx.get(f"{ollama_url}/api/tags", timeout=5)
+        ollama_ok = resp.status_code == 200
+    except Exception:
+        pass
+
+    console.print(Panel(
+        f"模型: {ollama_model}  Ollama: {'[green]连接正常[/green]' if ollama_ok else '[red]无法连接[/red]'} ({ollama_url})\n"
+        f"专家: {len(builtin)} builtin + {len(custom)} custom = {len(experts)} total\n"
+        f"项目: {project_root}\n"
+        f"记忆: {'[green]KAIWU.md 已初始化[/green]' if has_memory else '[yellow]未初始化 (kaiwu init)[/yellow]'}",
+        title="Kaiwu Status",
+        border_style="cyan",
+    ))
+
+
+# ── MCP serve command ────────────────────────────────────────
+
+@app.command("serve-mcp")
+def cmd_serve_mcp(
+    model: str = typer.Option(None, "--model", "-m", help="Ollama模型名称"),
+    model_path: str = typer.Option(None, "--model-path", help="本地GGUF模型路径"),
+    ollama_url: str = typer.Option("http://localhost:11434", "--ollama-url", help="Ollama服务地址"),
+    project_dir: str = typer.Option(".", "--project", "-d", help="项目根目录"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="详细日志"),
+):
+    """启动 KaiwuMCP 服务 (stdio)。"""
+    import asyncio as _asyncio
+    from kaiwu.mcp.router_mcp import KaiwuMCP
+
+    project_root = os.path.abspath(project_dir)
+    ollama_model = model or "qwen3-8b"
+
+    log_level = logging.DEBUG if verbose else logging.WARNING
+    logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
+
+    gate, orchestrator, memory, _reg = _build_pipeline(
+        model_path=model_path,
+        ollama_url=ollama_url,
+        ollama_model=ollama_model,
+        project_root=project_root,
+        verbose=verbose,
+    )
+
+    mcp = KaiwuMCP(gate=gate, orchestrator=orchestrator, memory=memory, project_root=project_root)
+    _asyncio.run(mcp.run_stdio())
 
 
 if __name__ == "__main__":

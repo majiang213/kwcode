@@ -157,7 +157,7 @@ class TestKaiwuMemory:
             mem = KaiwuMemory()
             result = mem.init(tmpdir)
             assert "Created" in result
-            assert os.path.exists(os.path.join(tmpdir, "KAIWU.md"))
+            assert os.path.exists(os.path.join(tmpdir, ".kaiwu", "PROJECT.md"))
 
     def test_init_no_overwrite(self):
         from kaiwu.memory.kaiwu_md import KaiwuMemory
@@ -217,8 +217,12 @@ class TestKaiwuMemory:
             )
             mem.save(tmpdir, ctx)
 
-            content = mem.show(tmpdir)
-            assert "locator_repair" not in content  # Should not save failed tasks
+            # PROJECT.md and EXPERT.md should NOT contain the failed task record
+            from kaiwu.memory import project_md, expert_md
+            proj_content = project_md.show(tmpdir)
+            expert_content = expert_md.show(tmpdir)
+            assert "locator_repair" not in proj_content
+            assert "locator_repair" not in expert_content
 
 
 # ── Test Orchestrator ─────────────────────────────────────────

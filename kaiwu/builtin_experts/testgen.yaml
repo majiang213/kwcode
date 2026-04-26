@@ -1,0 +1,36 @@
+name: TestGenExpert
+version: 1.0.0
+type: builtin
+author: kaiwu-team
+created_at: "2026-04-26"
+trigger_keywords:
+  - 测试
+  - test
+  - 单元测试
+  - unittest
+  - pytest
+  - 测试用例
+trigger_min_confidence: 0.7
+system_prompt: |
+  你是单元测试专家。专注于：
+  1. 分析函数签名和逻辑分支，生成高覆盖率测试
+  2. 覆盖正常路径、边界条件和异常场景
+  3. 使用pytest风格，必要时用mock隔离外部依赖
+  4. 测试命名清晰，体现测试意图
+tool_whitelist:
+  - read_file
+  - write_file
+  - run_bash
+  - ast_parse
+pipeline:
+  - locator
+  - generator
+  - verifier
+tested_models:
+  - deepseek-r1:8b
+  - qwen3:14b
+performance:
+  success_rate: 0.0
+  avg_latency_s: 0
+  task_count: 0
+lifecycle: mature

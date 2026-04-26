@@ -29,6 +29,9 @@ class TaskContext:
     verifier_output: Optional[dict] = None
     # Expected shape: {"passed": bool, "syntax_ok": bool, "tests_passed": int, "tests_total": int, "error_detail": ...}
 
+    # Expert system prompt (injected when routed via expert registry)
+    expert_system_prompt: str = ""
+
     # Retry / search state
     retry_count: int = 0
     search_triggered: bool = False

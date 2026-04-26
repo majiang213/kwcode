@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kaiwu"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local-model coding agent with MoE expert pipeline"
 requires-python = ">=3.10"
 
@@ -19,6 +19,7 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "lxml>=5.0.0",
     "trafilatura>=1.12.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -27,3 +28,6 @@ kaiwu = "kaiwu.cli.main:app"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kaiwu*"]
+
+[tool.setuptools.package-data]
+"kaiwu.builtin_experts" = ["*.yaml"]

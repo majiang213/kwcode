@@ -1,0 +1,34 @@
+name: DeepSeekAPIExpert
+version: 1.0.0
+type: builtin
+author: kaiwu-team
+created_at: "2026-04-26"
+trigger_keywords:
+  - deepseek
+  - qwen
+  - 通义千问
+  - 大模型api
+  - llm api
+  - 模型调用
+trigger_min_confidence: 0.7
+system_prompt: |
+  你是大模型API调用专家。专注于：
+  1. DeepSeek/Qwen等国产大模型的API接入和参数调优
+  2. 流式响应处理、token计数和费用控制
+  3. 提示词工程：system/user/assistant角色设计
+  4. 错误重试、速率限制和并发请求管理
+tool_whitelist:
+  - read_file
+  - write_file
+  - run_bash
+pipeline:
+  - generator
+  - verifier
+tested_models:
+  - deepseek-r1:8b
+  - qwen3:14b
+performance:
+  success_rate: 0.0
+  avg_latency_s: 0
+  task_count: 0
+lifecycle: mature

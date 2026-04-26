@@ -6,9 +6,45 @@
 
 ---
 
-## 当前状态：搜索模块已完成
+## 当前状态：v0.4 专家系统+飞轮已完成
 
-MVP 流水线 + 6 步搜索增强全部跑通。
+MVP 流水线 + 6 步搜索增强 + 专家注册表 + 3 层记忆 + 飞轮自动生成 + 专家打包 + MCP Router 全部完成。
+
+---
+
+## v0.4 新增模块
+
+### 专家注册表 (kaiwu/registry/)
+- 12 个预置专家 YAML（api, bugfix, deepseekapi, docstring, fastapi, mybatis, refactor, springboot, sqlopt, testgen, typehint, uniapp）
+- ExpertRegistry: 内存+磁盘双层，关键词饱和匹配（1命中=0.50, 2=0.75, 3=0.875）
+- ExpertLoader: YAML 加载 + 校验
+- ExpertPackager: .kwx 导入/导出（ZIP 格式）
+- 生命周期状态机：new → mature → declining → archived
+
+### 3 层记忆系统 (kaiwu/memory/)
+- PROJECT.md — 项目级记忆（技术栈、架构、约定）
+- EXPERT.md — 专家级记忆（每个专家的经验积累）
+- PATTERN.md — 模式级记忆（跨项目的通用模式）
+
+### 专家飞轮 (kaiwu/flywheel/)
+- TrajectoryCollector — 任务执行轨迹记录（~/.kaiwu/trajectories/）
+- PatternDetector — 重复成功模式检测（gate 1: >=5次同类型+同流水线+全成功）
+- ExpertGeneratorFlywheel — LLM 从轨迹生成专家 YAML 草稿
+- ABTester — 三门验证（gate 2 回测 + gate 3 AB 测试）
+- LifecycleManager — 专家生命周期状态机
+
+### 专家打包 (.kwx)
+- `kaiwu expert export <name>` → 导出 .kwx 文件
+- `kaiwu expert install <path.kwx>` → 安装到 ~/.kaiwu/experts/
+
+### KaiwuMCP Router (kaiwu/mcp/)
+- router_mcp.py — MCP 协议路由器
+- `kaiwu serve-mcp` 启动 MCP 服务
+
+### CLI 子命令
+- `kaiwu expert list/info/export/install/remove/create`
+- `kaiwu status` — 查看项目状态
+- `kaiwu serve-mcp` — 启动 MCP 服务
 
 ---
 
@@ -20,6 +56,8 @@ MVP 流水线 + 6 步搜索增强全部跑通。
 | V2 OpenHands集成 | 跳过，走 FLEX-1 自实现 | ToolExecutor 5个工具已完成 |
 | V3 Locator精度 | 文件级 90%，函数级 20% | 函数级已加 few-shot 优化，待更大模型验证 |
 | V4 搜索模块 | 意图4/4, DDG 4/4, Fetch 3/4, 压缩4/4 | trafilatura+bs4, 耗时略超15s(LLM瓶颈) |
+| V5 AST Locator | 脚本就绪，待运行 | A组(LLM猜测) vs B组(tree-sitter stub) |
+| V6 专家生成质量 | 脚本就绪，待运行 | 3组×5轨迹，需要Ollama在线 |
 | E2E 单文件 | 通过 | gemma3:4b 5.7s / gemma4:e2b 64.9s，5/5 测试 |
 | E2E 多文件 | 通过 | gemma3:4b 7.7s，password leak 跨2文件，3/3 测试 |
 | gemma4:e2b Gate | 100% 类型准确率（含 office） | 比 gemma3:4b 的 67% 大幅提升，但慢 10x |
@@ -46,6 +84,10 @@ SearchAugmentorExpert.search(ctx)
 用户输入（CLI）
     │
     ▼
+  ExpertRegistry.match()  ← 关键词匹配，毫秒级
+    │ 命中 → 注入 expert.system_prompt
+    │ 未命中 → 走 Gate
+    ▼
   Gate（单次LLM调用，结构化JSON路由）
     │
     ▼ 按 expert_type 选择流水线
@@ -61,7 +103,13 @@ SearchAugmentorExpert.search(ctx)
   SearchAugmentor → 重新跑流水线
     │
     ▼
-  KAIWU.md 记忆写入
+  TrajectoryCollector 记录轨迹
+    │
+    ▼
+  3层记忆写入 (PROJECT.md / EXPERT.md / PATTERN.md)
+    │
+    ▼ 后台飞轮
+  PatternDetector → ExpertGenerator → ABTester → LifecycleManager
 ```
 
 ## 文件结构
@@ -70,17 +118,40 @@ SearchAugmentorExpert.search(ctx)
 kaiwu/
 ├── pyproject.toml
 └── kaiwu/
-    ├── cli/main.py              # CLI入口 typer+rich
+    ├── cli/main.py              # CLI入口 typer+rich (expert/status/serve-mcp子命令)
     ├── core/
     │   ├── context.py           # TaskContext 数据类
     │   ├── gate.py              # Gate 分类器
     │   └── orchestrator.py      # 流水线编排器
     ├── experts/
-    │   ├── locator.py           # 文件→函数 两阶段定位
+    │   ├── locator.py           # 文件→函数 两阶段定位 (符号索引辅助)
     │   ├── generator.py         # 从文件读original，LLM只生成modified
     │   ├── verifier.py          # 语法检查 + pytest 验证
     │   ├── search_augmentor.py  # 6步搜索流水线编排
     │   └── office_handler.py    # MVP stub
+    ├── registry/
+    │   ├── expert_registry.py   # 内存+磁盘双层注册表，关键词饱和匹配
+    │   ├── expert_loader.py     # YAML加载+校验
+    │   └── expert_packager.py   # .kwx导入/导出 (ZIP格式)
+    ├── builtin_experts/         # 12个预置专家YAML
+    │   ├── api.yaml
+    │   ├── bugfix.yaml
+    │   ├── fastapi.yaml
+    │   ├── testgen.yaml
+    │   └── ... (12个)
+    ├── flywheel/
+    │   ├── trajectory_collector.py  # 轨迹记录 → ~/.kaiwu/trajectories/
+    │   ├── pattern_detector.py      # gate 1: 重复模式检测
+    │   ├── expert_generator.py      # LLM生成专家YAML草稿
+    │   ├── ab_tester.py             # gate 2+3: 回测+AB测试
+    │   └── lifecycle_manager.py     # 专家生命周期状态机
+    ├── memory/
+    │   ├── project_md.py        # PROJECT.md 项目级记忆
+    │   ├── expert_md.py         # EXPERT.md 专家级记忆
+    │   ├── pattern_md.py        # PATTERN.md 模式级记忆
+    │   └── kaiwu_md.py          # KAIWU.md 兼容旧版
+    ├── mcp/
+    │   └── router_mcp.py        # KaiwuMCP Router
     ├── search/
     │   ├── intent_classifier.py # 纯关键词意图分类
     │   ├── query_generator.py   # LLM生成英文query
@@ -89,10 +160,17 @@ kaiwu/
     │   ├── content_fetcher.py   # trafilatura/httpx正文提取
     │   └── context_compressor.py# LLM压缩摘要
     ├── llm/llama_backend.py     # llama.cpp + Ollama 双后端
-    ├── memory/kaiwu_md.py       # KAIWU.md 项目记忆
-    ├── tools/executor.py        # read/write/bash/list/git 工具层
+    ├── tools/
+    │   ├── executor.py          # read/write/bash/list/git 工具层
+    │   └── ast_utils.py         # AST符号提取
     ├── tests/test_core.py       # 24个单元测试
-    └── validation/              # V1/V2/V3 验证脚本 + 结论JSON
+    └── validation/              # V1-V6 验证脚本 + 结论JSON
+        ├── v1_gate_stability.py
+        ├── v2_openhands_check.py
+        ├── v3_locator_accuracy.py
+        ├── v4_search_module.py
+        ├── v5_ast_locator.py
+        └── v6_expert_generation.py
 ```
 
 ---
@@ -179,7 +257,23 @@ kaiwu/
 - [x] Gate codegen/locator_repair 边界优化（prompt 明确描述，5/5 边界 case 通过）
 - [x] 性能优化：reasoning模型think=false，gemma4 64.9s→19.3s（3.4x提速）
 - [x] 非Python语言支持（JS/Go/Rust regex提取验证通过）
+- [x] 专家注册表（12个预置专家，关键词匹配，生命周期状态机）
+- [x] 3层记忆系统（PROJECT.md / EXPERT.md / PATTERN.md）
+- [x] 专家飞轮（轨迹收集 → 模式检测 → 专家生成 → 三门验证 → 生命周期）
+- [x] 专家打包（.kwx 导入/导出）
+- [x] KaiwuMCP Router
+- [x] CLI 子命令（expert list/info/export/install/remove/create, status, serve-mcp）
+- [x] V5/V6 验证脚本框架（就绪，需要Ollama在线运行）
+- [x] 安装脚本（install.ps1 + install.sh，国内镜像适配）
+- [x] 中文文档（README_zh.md）
+- [x] E2E 端到端验收（fibonacci off-by-one，gemma3:4b，22.4s，4/4测试，含重试+搜索+记忆+轨迹）
+- [x] Windows cmd原生验证（Python import + pytest 24/24 通过）
+- [x] 红线约束代码review（10/10 CORE 全部 PASS）
+- [ ] V5 AST Locator实际验证（需要tree-sitter + Ollama）
+- [ ] V6 专家生成质量实际验证（需要Ollama）
+- [ ] 预置专家20任务验证（Step 16）
 
 ### 已知限制
 
 - V3 验证脚本的临时目录路径匹配有问题，不影响真实场景
+- V5/V6 验证脚本已就绪，需要 Ollama 在线才能运行

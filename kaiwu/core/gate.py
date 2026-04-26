@@ -1,13 +1,17 @@
 """
 Gate: single LLM call, structured JSON output, routes to expert pipeline.
 RED-1: Must output structured JSON, no string parsing.
+v0.4: Expert registry integration — keyword match first, LLM fallback.
 """
 
 import json
 import logging
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from kaiwu.llm.llama_backend import LLMBackend
+
+if TYPE_CHECKING:
+    from kaiwu.registry.expert_registry import ExpertRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -47,18 +51,46 @@ VALID_DIFFICULTIES = {"easy", "hard"}
 
 
 class Gate:
-    """Task classifier. One LLM call, deterministic routing."""
+    """Task classifier. Expert registry first, LLM fallback."""
 
-    def __init__(self, llm: LLMBackend, use_grammar: bool = False):
+    # Map expert pipeline to existing expert_type for orchestrator compatibility
+    _PIPELINE_TO_TYPE = {
+        ("locator", "generator", "verifier"): "locator_repair",
+        ("generator", "verifier"): "codegen",
+        ("locator", "generator"): "doc",
+        ("generator",): "codegen",
+    }
+
+    def __init__(self, llm: LLMBackend, use_grammar: bool = False, registry: "ExpertRegistry | None" = None):
         self.llm = llm
         self.use_grammar = use_grammar
+        self.registry = registry
 
     def classify(self, user_input: str, memory_context: str = "") -> dict:
         """
         Classify user input into expert_type + difficulty.
-        Returns dict with keys: expert_type, task_summary, difficulty.
-        On parse failure, falls back to locator_repair/easy.
+        1. Try expert registry keyword match (no LLM call, millisecond-level)
+        2. Fall through to general LLM classification if no match
         """
+        # ── Expert registry fast path ──
+        if self.registry:
+            match = self.registry.match(user_input)
+            if match:
+                expert = match["expert"]
+                pipeline = tuple(expert["pipeline"])
+                expert_type = self._PIPELINE_TO_TYPE.get(pipeline, "locator_repair")
+                return {
+                    "expert_type": expert_type,
+                    "expert_name": match["name"],
+                    "task_summary": user_input[:10],
+                    "difficulty": "hard" if len(pipeline) >= 3 else "easy",
+                    "route_type": "expert_registry",
+                    "confidence": match["confidence"],
+                    "system_prompt": expert.get("system_prompt", ""),
+                    "pipeline": list(pipeline),
+                }
+
+        # ── General LLM classification fallback ──
         prompt = GATE_PROMPT.format(user_input=user_input)
         if memory_context:
             prompt = f"项目记忆：\n{memory_context}\n\n{prompt}"
@@ -74,7 +106,10 @@ class Gate:
             grammar_str=grammar,
         )
 
-        return self._parse(raw, user_input)
+        result = self._parse(raw, user_input)
+        result["expert_name"] = None
+        result["route_type"] = "general"
+        return result
 
     def _parse(self, raw: str, user_input: str) -> dict:
         """Parse and validate Gate output. Fallback on any failure."""
