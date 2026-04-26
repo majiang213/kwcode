@@ -1,173 +1,128 @@
 """
-SearchAugmentor expert: triggered on failure (2x) or hard tasks.
-Searches web for solutions, compresses results, injects into context.
-RED-5: Part of retry budget (max 3 total).
+SearchAugmentor expert: 6 步搜索流水线。
+IntentClassifier → QueryGenerator → DuckDuckGo → QualityFilter → ContentFetcher → ContextCompressor
+
+红线：
+  SEARCH-RED-1: 零外部 API key
+  SEARCH-RED-3: 失败不中断主流程，返回空字符串
+  SEARCH-RED-4: 总耗时 ≤15s
+  SEARCH-RED-5: 唯一搜索入口 DuckDuckGo
 """
 
-import json
 import logging
-from typing import Optional
+import random
+import time
 
 from kaiwu.core.context import TaskContext
 from kaiwu.llm.llama_backend import LLMBackend
+from kaiwu.search.intent_classifier import classify as classify_intent
+from kaiwu.search.query_generator import QueryGenerator
+from kaiwu.search.duckduckgo import search as ddg_search
+from kaiwu.search.quality_filter import filter_results
+from kaiwu.search.content_fetcher import ContentFetcher
+from kaiwu.search.context_compressor import ContextCompressor
 
 logger = logging.getLogger(__name__)
 
-QUERY_GEN_PROMPT = """你是搜索查询生成器。根据任务描述和错误信息，生成2-3个精准的英文技术搜索query。
-
-任务描述：{task_description}
-错误信息：{error_detail}
-
-返回JSON格式：
-{{"queries": ["query1", "query2"]}}
-
-要求：
-1. 用英文搜索（技术内容英文结果更好）
-2. 包含具体技术栈名称
-3. 只返回JSON"""
-
-SUMMARIZE_PROMPT = """你是技术摘要专家。从搜索结果中提取与当前任务最相关的3-5个关键技术要点。
-
-当前任务：{task_description}
-当前错误：{error_detail}
-
-搜索结果：
-{search_results}
-
-返回简洁的技术要点列表（每条不超过50字），格式：
-1. 要点一
-2. 要点二
-3. 要点三
-
-只返回要点，不要其他内容。"""
+MAX_SEARCH_SECONDS = 15  # SEARCH-RED-4
 
 
 class SearchAugmentorExpert:
-    """Search-augmented rescue. Generates queries, fetches results, compresses into context."""
+    """6 步搜索增强流水线。对外接口不变：search(ctx) -> str。"""
 
-    def __init__(self, llm: LLMBackend, search_fn=None):
-        self.llm = llm
-        # search_fn: callable(query: str) -> list[dict] with keys: title, snippet, url
-        # Default: DuckDuckGo (FLEX-3: replaceable)
-        self._search_fn = search_fn or self._default_search
+    def __init__(self, llm: LLMBackend):
+        self.query_gen = QueryGenerator(llm)
+        self.fetcher = ContentFetcher()
+        self.compressor = ContextCompressor(llm)
 
     def search(self, ctx: TaskContext) -> str:
         """
-        Full search pipeline:
-        1. Generate queries from task + error
-        2. Execute searches
-        3. Summarize results
-        Returns compressed search context string.
+        完整搜索流水线。任何异常返回空字符串（SEARCH-RED-3）。
+        总耗时超 15s 提前返回已有内容（SEARCH-RED-4）。
         """
-        error_detail = ""
-        if ctx.verifier_output:
-            error_detail = ctx.verifier_output.get("error_detail", "")
-
-        # Step 1: Generate search queries
-        queries = self._generate_queries(ctx.user_input, error_detail)
-        if not queries:
-            queries = [ctx.user_input[:100]]  # Fallback: use raw input
-
-        # Step 2: Execute searches
-        all_results = []
-        for q in queries[:3]:  # Cap at 3 queries
-            results = self._search_fn(q)
-            all_results.extend(results)
-
-        if not all_results:
-            logger.warning("SearchAugmentor: no results found")
-            return ""
-
-        # Step 3: Summarize (compress into key facts)
-        raw_text = self._format_results(all_results[:10])  # Cap at 10 results
-        summary = self._summarize(ctx.user_input, error_detail, raw_text)
-
-        logger.info("SearchAugmentor: found %d results, summarized", len(all_results))
-        return summary
-
-    def _generate_queries(self, task_desc: str, error_detail: str) -> list[str]:
-        """Use LLM to generate precise search queries."""
-        prompt = QUERY_GEN_PROMPT.format(
-            task_description=task_desc,
-            error_detail=error_detail or "(无错误信息)",
-        )
-        raw = self.llm.generate(prompt=prompt, max_tokens=200, temperature=0.0)
-
+        t0 = time.time()
         try:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start != -1 and end > start:
-                data = json.loads(raw[start:end + 1])
-                return data.get("queries", [])
-        except (json.JSONDecodeError, KeyError):
-            pass
+            # ① 意图分类（纯关键词，毫秒级）
+            intent = classify_intent(
+                ctx.user_input,
+                ctx.gate_result.get("task_summary", ""),
+            )
+            logger.info("[search] intent=%s", intent)
 
-        logger.warning("Query generation parse failed: %s", raw[:200])
+            # ② 生成 query（一次 LLM 调用）
+            queries = self.query_gen.generate(ctx, intent)
+            if not queries:
+                queries = [ctx.user_input[:80]]
+            logger.info("[search] queries=%s", queries)
+
+            if self._overtime(t0):
+                return ""
+
+            # ③ DuckDuckGo 搜索（带重试）
+            all_results = []
+            for q in queries[:3]:
+                if self._overtime(t0):
+                    break
+                results = self._search_with_retry(q)
+                all_results.extend(results)
+
+            if not all_results:
+                logger.warning("[search] no results from DDG")
+                return ""
+
+            # ④ 质量过滤
+            filtered = filter_results(all_results, max_fetch=3)
+            urls = [r["url"] for r in filtered if r.get("url")]
+            logger.info("[search] filtered urls=%s", urls)
+
+            if not urls:
+                # 没有可 fetch 的 URL，用 snippet 兜底
+                snippets = [r.get("snippet", "") for r in all_results[:5]]
+                return self.compressor.compress(ctx.user_input, snippets)
+
+            if self._overtime(t0):
+                # 超时但有 snippet，用 snippet 兜底
+                snippets = [r.get("snippet", "") for r in filtered]
+                return "\n".join(s for s in snippets if s)[:400]
+
+            # ⑤ 正文提取
+            remaining = max(2.0, MAX_SEARCH_SECONDS - (time.time() - t0))
+            contents = self.fetcher.fetch_many(urls, timeout=remaining)
+            logger.info("[search] fetched %d pages", sum(1 for c in contents if c))
+
+            # 如果正文提取全部失败，用 snippet 兜底
+            if not any(contents):
+                contents = [r.get("snippet", "") for r in filtered]
+
+            if self._overtime(t0):
+                # 超时，直接拼接已有内容
+                return "\n\n".join(c for c in contents if c)[:400]
+
+            # ⑥ 压缩
+            compressed = self.compressor.compress(ctx.user_input, contents)
+            elapsed = time.time() - t0
+            logger.info("[search] done %.1fs len=%d", elapsed, len(compressed))
+            return compressed
+
+        except Exception as e:
+            logger.error("[search] pipeline error: %s", e)
+            return ""  # SEARCH-RED-3
+
+    @staticmethod
+    def _search_with_retry(query: str, max_retries: int = 2) -> list[dict]:
+        """DDG 搜索带重试（SEARCH-FLEX-2）。"""
+        for attempt in range(max_retries + 1):
+            results = ddg_search(query)
+            if results:
+                return results
+            if attempt < max_retries:
+                time.sleep(random.uniform(1.0, 3.0))
         return []
 
-    def _summarize(self, task_desc: str, error_detail: str, raw_results: str) -> str:
-        """Compress search results into key technical facts."""
-        prompt = SUMMARIZE_PROMPT.format(
-            task_description=task_desc,
-            error_detail=error_detail or "(无错误信息)",
-            search_results=raw_results[:3000],  # Cap input size
-        )
-        return self.llm.generate(prompt=prompt, max_tokens=500, temperature=0.0)
-
     @staticmethod
-    def _format_results(results: list[dict]) -> str:
-        """Format search results into readable text."""
-        lines = []
-        for i, r in enumerate(results, 1):
-            title = r.get("title", "")
-            snippet = r.get("snippet", "")
-            lines.append(f"[{i}] {title}\n{snippet}")
-        return "\n\n".join(lines)
-
-    @staticmethod
-    def _default_search(query: str) -> list[dict]:
-        """DuckDuckGo search via HTML API (FLEX-3: MVP default, replaceable)."""
-        import httpx
-
-        try:
-            resp = httpx.get(
-                "https://html.duckduckgo.com/html/",
-                params={"q": query},
-                headers={"User-Agent": "Mozilla/5.0 (compatible; Kaiwu/0.3)"},
-                timeout=15.0,
-                follow_redirects=True,
-            )
-            resp.raise_for_status()
-            return SearchAugmentorExpert._parse_ddg_html(resp.text)
-        except Exception as e:
-            logger.warning("DuckDuckGo search failed: %s", e)
-            return []
-
-    @staticmethod
-    def _parse_ddg_html(html: str) -> list[dict]:
-        """Parse DuckDuckGo HTML results (simple regex, no bs4 dependency)."""
-        import re
-
-        results = []
-        # Extract result blocks
-        snippets = re.findall(
-            r'class="result__snippet"[^>]*>(.*?)</a>',
-            html, re.DOTALL,
-        )
-        titles = re.findall(
-            r'class="result__a"[^>]*>(.*?)</a>',
-            html, re.DOTALL,
-        )
-        urls = re.findall(
-            r'class="result__url"[^>]*href="([^"]*)"',
-            html,
-        )
-
-        for i in range(min(len(titles), len(snippets), 10)):
-            # Strip HTML tags
-            title = re.sub(r"<[^>]+>", "", titles[i]).strip()
-            snippet = re.sub(r"<[^>]+>", "", snippets[i]).strip()
-            url = urls[i] if i < len(urls) else ""
-            results.append({"title": title, "snippet": snippet, "url": url})
-
-        return results
+    def _overtime(t0: float) -> bool:
+        """检查是否超过 15s 时间预算。"""
+        if time.time() - t0 > MAX_SEARCH_SECONDS:
+            logger.warning("[search] overtime, returning early")
+            return True
+        return False

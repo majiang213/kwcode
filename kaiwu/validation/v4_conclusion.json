@@ -1,0 +1,107 @@
+{
+  "intent_accuracy": 4,
+  "query_keyword_hit": 4,
+  "ddg_success": 4,
+  "fetch_success": 3,
+  "compress_success": 4,
+  "time_success": 2,
+  "total_cases": 4,
+  "details": [
+    {
+      "input": "找最新的本地RAG开源框架",
+      "intent": "github",
+      "intent_ok": true,
+      "queries": [
+        "latest open-source RAG framework github repository",
+        "RAG framework comparison and benchmarks",
+        "local RAG implementation tutorial and examples"
+      ],
+      "query_ok": true,
+      "ddg_count": 10,
+      "ddg_ok": true,
+      "filtered_urls": [
+        "https://github.com/Andrew-Jang/RAGHub",
+        "https://www.firecrawl.dev/blog/best-open-source-rag-frameworks",
+        "https://www.analyticsvidhya.com/blog/2025/10/github-repositories-for-mastering-rag-systems/"
+      ],
+      "fetch_count": 2,
+      "fetch_ok": true,
+      "compressed_len": 400,
+      "compress_ok": true,
+      "elapsed": 18.1,
+      "time_ok": false
+    },
+    {
+      "input": "fastapi jwt验证失败怎么解决",
+      "intent": "bug",
+      "intent_ok": true,
+      "queries": [
+        "FastAPI JWT validation error troubleshooting",
+        "FastAPI JWT authentication failure solution",
+        "FastAPI JWT decode error fix"
+      ],
+      "query_ok": true,
+      "ddg_count": 10,
+      "ddg_ok": true,
+      "filtered_urls": [
+        "https://stackoverflow.com/questions/76603811/token-authentication-issue-with-fastapi-and-jwt-tokens-could-not-validate-cre",
+        "https://www.youtube.com/watch?v=BJmUZIX6cNI",
+        "https://developers.cloudflare.com/cloudflare-one/tutorials/fastapi/"
+      ],
+      "fetch_count": 0,
+      "fetch_ok": false,
+      "compressed_len": 400,
+      "compress_ok": true,
+      "elapsed": 15.6,
+      "time_ok": false
+    },
+    {
+      "input": "attention机制相关论文",
+      "intent": "arxiv",
+      "intent_ok": true,
+      "queries": [
+        "attention mechanism research papers arXiv",
+        "attention mechanisms in deep learning tutorial",
+        "self-attention mechanism applications and examples"
+      ],
+      "query_ok": true,
+      "ddg_count": 10,
+      "ddg_ok": true,
+      "filtered_urls": [
+        "https://arxiv.org/pdf/2601.03329",
+        "https://arxiv.deeppaper.ai/domain_tags/Attention Mechanism",
+        "https://research.google/pubs/attention-is-all-you-need/"
+      ],
+      "fetch_count": 2,
+      "fetch_ok": true,
+      "compressed_len": 400,
+      "compress_ok": true,
+      "elapsed": 14.8,
+      "time_ok": true
+    },
+    {
+      "input": "python异步http请求用哪个库",
+      "intent": "pypi",
+      "intent_ok": true,
+      "queries": [
+        "best python package for asynchronous http requests",
+        "pip install asynchttpx python asynchronous http client",
+        "python libraries for making concurrent http requests"
+      ],
+      "query_ok": true,
+      "ddg_count": 10,
+      "ddg_ok": true,
+      "filtered_urls": [
+        "https://github.com/encode/httpx",
+        "https://pypi.org/project/httpx/",
+        "https://udemy.com"
+      ],
+      "fetch_count": 2,
+      "fetch_ok": true,
+      "compressed_len": 400,
+      "compress_ok": true,
+      "elapsed": 14.8,
+      "time_ok": true
+    }
+  ]
+}
