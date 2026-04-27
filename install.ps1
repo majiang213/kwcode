@@ -1,4 +1,4 @@
-# Kaiwu 安装程序 - Windows PowerShell
+# KwQode 安装程序 - Windows PowerShell
 # 用法: powershell -ExecutionPolicy Bypass -File install.ps1
 
 $ErrorActionPreference = "Continue"
@@ -7,7 +7,7 @@ $ErrorActionPreference = "Continue"
 # ── Banner ───────────────────────────────────────────────────
 Write-Host ""
 Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "  ║       Kaiwu 安装程序 v0.4            ║" -ForegroundColor Cyan
+Write-Host "  ║       KwQode 安装程序 v0.4            ║" -ForegroundColor Cyan
 Write-Host "  ║   本地模型 Coding Agent               ║" -ForegroundColor Cyan
 Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
 Write-Host ""
@@ -64,7 +64,7 @@ try {
 }
 
 # ── Step 3: pip install kaiwu ────────────────────────────────
-Write-Step "安装 Kaiwu..."
+Write-Step "安装 KwQode..."
 
 $installed = $false
 
@@ -87,7 +87,7 @@ if (-not $installed) {
 }
 
 if (-not $installed) {
-    Write-Err "Kaiwu 安装失败"
+    Write-Err "KwQode 安装失败"
     Write-Info "请手动执行: $pythonCmd -m pip install kaiwu"
     Write-Info "如果网络慢，加上: -i https://pypi.tuna.tsinghua.edu.cn/simple"
     exit 1
@@ -155,26 +155,26 @@ if ($ollamaOk) {
     }
 }
 
-# ── Step 6: kaiwu init ───────────────────────────────────────
-Write-Step "初始化 Kaiwu..."
+# ── Step 6: kwqode init ──────────────────────────────────────
+Write-Step "初始化 KwQode..."
 
 try {
-    & kaiwu init 2>&1 | Out-Null
+    & kwqode init 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Info "KAIWU.md 已初始化"
     }
 } catch {
-    Write-Info "跳过初始化（可稍后在项目目录执行 kaiwu init）"
+    Write-Info "跳过初始化（可稍后在项目目录执行 kwqode init）"
 }
 
-# ── Step 7: kaiwu status ─────────────────────────────────────
+# ── Step 7: kwqode status ────────────────────────────────────
 Write-Step "验证安装..."
 
 try {
-    & kaiwu status
+    & kwqode status
 } catch {
     Write-Warn "状态检查失败，但安装可能已成功"
-    Write-Info "请手动执行: kaiwu status"
+    Write-Info "请手动执行: kwqode status"
 }
 
 # ── 完成 ─────────────────────────────────────────────────────
@@ -185,9 +185,9 @@ Write-Host "  ╚═════════════════════
 Write-Host ""
 Write-Host "  下一步:" -ForegroundColor Cyan
 Write-Host "    1. cd 到你的项目目录" -ForegroundColor White
-Write-Host "    2. kaiwu init          # 初始化项目记忆" -ForegroundColor White
-Write-Host "    3. kaiwu               # 进入交互模式" -ForegroundColor White
-Write-Host '    4. kaiwu "修复登录bug"  # 直接执行任务' -ForegroundColor White
+Write-Host "    2. kwqode init          # 初始化项目记忆" -ForegroundColor White
+Write-Host "    3. kwqode               # 进入交互模式" -ForegroundColor White
+Write-Host '    4. kwqode "修复登录bug"  # 直接执行任务' -ForegroundColor White
 Write-Host ""
 Write-Host "  文档: https://github.com/kaiwu-agent/kaiwu" -ForegroundColor Gray
 Write-Host ""

@@ -1,4 +1,4 @@
-# Kaiwu - 本地模型 Coding Agent
+# KwQode - 本地模型 Coding Agent
 
 > 中国开发者的本地 coding agent——Windows 打开就能用，数据不出网，越用越懂你的项目。
 
@@ -33,7 +33,7 @@ chmod +x install.sh && ./install.sh
 ### 手动安装
 
 ```bash
-# 1. 安装 Kaiwu
+# 1. 安装 KwQode
 pip install kaiwu
 # 国内网络慢可用清华镜像
 pip install kaiwu -i https://pypi.tuna.tsinghua.edu.cn/simple
@@ -49,7 +49,7 @@ ollama pull gemma3:4b     # 4GB 显存或 CPU
 
 # 4. 初始化项目
 cd your-project
-kaiwu init
+kwqode init
 ```
 
 ## 使用方法
@@ -58,18 +58,18 @@ kaiwu init
 
 ```bash
 # 交互模式（REPL）
-kaiwu
+kwqode
 
 # 单次任务
-kaiwu "修复登录接口的空指针异常"
-kaiwu "给 UserService 加单元测试"
-kaiwu "把这个函数重构成策略模式"
+kwqode "修复登录接口的空指针异常"
+kwqode "给 UserService 加单元测试"
+kwqode "把这个函数重构成策略模式"
 ```
 
 ### CLI 参数
 
 ```bash
-kaiwu [任务] [选项]
+kwqode [任务] [选项]
 
 选项:
   -m, --model TEXT       Ollama 模型名称（默认 qwen3-8b）
@@ -98,21 +98,21 @@ kaiwu [任务] [选项]
 ### 子命令
 
 ```bash
-kaiwu init              # 初始化项目记忆
-kaiwu status            # 查看模型/专家/连接状态
-kaiwu memory            # 查看 KAIWU.md 内容
-kaiwu serve-mcp         # 启动 MCP Server（stdio 模式）
+kwqode init              # 初始化项目记忆
+kwqode status            # 查看模型/专家/连接状态
+kwqode memory            # 查看 KAIWU.md 内容
+kwqode serve-mcp         # 启动 MCP Server（stdio 模式）
 ```
 
 ### 专家管理
 
 ```bash
-kaiwu expert list                # 列出所有专家
-kaiwu expert info APIExpert      # 查看专家详情
-kaiwu expert create my-expert    # 创建自定义专家模板
-kaiwu expert export APIExpert    # 导出为 .kwx 包
-kaiwu expert install ./my.kwx    # 安装专家包
-kaiwu expert remove my-expert    # 删除专家
+kwqode expert list                # 列出所有专家
+kwqode expert info APIExpert      # 查看专家详情
+kwqode expert create my-expert    # 创建自定义专家模板
+kwqode expert export APIExpert    # 导出为 .kwx 包
+kwqode expert install ./my.kwx    # 安装专家包
+kwqode expert remove my-expert    # 删除专家
 ```
 
 ## 架构
@@ -186,7 +186,7 @@ kaiwu expert remove my-expert    # 删除专家
 
 ## 配置
 
-Kaiwu 通过命令行参数和环境变量配置，无需配置文件。
+KwQode 通过命令行参数和环境变量配置，无需配置文件。
 
 **环境变量：**
 
@@ -198,10 +198,10 @@ Kaiwu 通过命令行参数和环境变量配置，无需配置文件。
 
 **项目级配置：**
 
-每个项目根目录的 `KAIWU.md` 文件记录项目架构、技术栈和偏好，Kaiwu 会自动读取并作为上下文传给 LLM。
+每个项目根目录的 `KAIWU.md` 文件记录项目架构、技术栈和偏好，KwQode 会自动读取并作为上下文传给 LLM。
 
 ```bash
-kaiwu init    # 自动扫描项目结构，生成 KAIWU.md
+kwqode init    # 自动扫描项目结构，生成 KAIWU.md
 ```
 
 ## 常见问题
@@ -227,13 +227,13 @@ pip install kaiwu -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 **Q: 模型推理太慢？**
 
-- 确认 GPU 被正确识别：`nvidia-smi` 或 `kaiwu status`
-- 换用更小的模型：`kaiwu -m gemma3:4b "你的任务"`
+- 确认 GPU 被正确识别：`nvidia-smi` 或 `kwqode status`
+- 换用更小的模型：`kwqode -m gemma3:4b "你的任务"`
 - Reasoning 模型（如 deepseek-r1）可关闭 thinking：自动优化已内置
 
 **Q: Windows 下中文乱码？**
 
-Kaiwu 已内置 GBK 编码修复。如仍有问题：
+KwQode 已内置 GBK 编码修复。如仍有问题：
 ```powershell
 # PowerShell 设置 UTF-8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -244,17 +244,17 @@ chcp 65001
 
 通过 MCP 协议：
 ```bash
-kaiwu serve-mcp -m qwen3:8b
+kwqode serve-mcp -m qwen3:8b
 ```
-在 IDE 的 MCP 配置中添加 Kaiwu 作为 stdio server 即可。
+在 IDE 的 MCP 配置中添加 KwQode 作为 stdio server 即可。
 
 **Q: 如何创建自定义专家？**
 
 ```bash
-kaiwu expert create my-expert    # 生成模板 YAML
+kwqode expert create my-expert    # 生成模板 YAML
 # 编辑 ~/.kaiwu/experts/my-expert.yaml
 # 配置 trigger_keywords、system_prompt、pipeline
-kaiwu expert list                # 确认已加载
+kwqode expert list                # 确认已加载
 ```
 
 ## 系统要求

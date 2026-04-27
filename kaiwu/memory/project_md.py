@@ -315,7 +315,7 @@ def show(project_root: str) -> str:
     """Display PROJECT.md content."""
     path = _md_path(project_root)
     if not os.path.exists(path):
-        return "PROJECT.md not found. Run `kaiwu init` to create."
+        return "PROJECT.md not found. Run `kwqode init` to create."
     try:
         with open(path, "r", encoding="utf-8") as f:
             return f.read()

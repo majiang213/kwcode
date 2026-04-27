@@ -1,9 +1,9 @@
 """
-Kaiwu CLI entry point.
-- kaiwu              → 进入交互式 REPL
-- kaiwu "修复bug"    → 单次执行
-- kaiwu init         → 初始化 KAIWU.md
-- kaiwu memory       → 查看项目记忆
+KwQode CLI entry point.
+- kwqode              → 进入交互式 REPL
+- kwqode "修复bug"    → 单次执行
+- kwqode init         → 初始化 KAIWU.md
+- kwqode memory       → 查看项目记忆
 """
 
 import logging
@@ -23,8 +23,8 @@ from rich.panel import Panel
 from rich.prompt import Prompt
 
 app = typer.Typer(
-    name="kaiwu",
-    help="Kaiwu - 本地模型 coding agent",
+    name="kwqode",
+    help="KwQode - 本地模型 coding agent",
     add_completion=False,
     no_args_is_help=False,
 )
@@ -203,7 +203,7 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
     from kaiwu.memory.kaiwu_md import KaiwuMemory
 
     console.print(Panel(
-        f"[bold]Kaiwu v0.4[/bold]  交互模式\n"
+        f"[bold]KwQode v0.4[/bold]  交互模式\n"
         f"模型: {ollama_model}  项目: {project_root}\n"
         f"输入任务开始，/help 查看命令，/exit 退出",
         border_style="cyan",
@@ -223,7 +223,7 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
     while True:
         try:
             console.print()
-            user_input = Prompt.ask("[bold cyan]kaiwu[/bold cyan]").strip()
+            user_input = Prompt.ask("[bold cyan]kwqode[/bold cyan]").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("\n  [dim]bye[/dim]")
             break
@@ -342,7 +342,7 @@ def main(
     do_init: bool = typer.Option(False, "--init", help="初始化KAIWU.md"),
     show_memory: bool = typer.Option(False, "--memory", help="查看项目记忆"),
 ):
-    """Kaiwu - 本地模型 coding agent。无参数进入交互模式。"""
+    """KwQode - 本地模型 coding agent。无参数进入交互模式。"""
 
     log_level = logging.DEBUG if verbose else logging.WARNING
     logging.basicConfig(level=log_level, format="%(name)s: %(message)s")
@@ -376,7 +376,7 @@ def main(
 
     # ── Single task mode ──
     console.print(Panel(
-        f"[bold]Kaiwu v0.4[/bold] | {ollama_model} | {project_root}",
+        f"[bold]KwQode v0.4[/bold] | {ollama_model} | {project_root}",
         border_style="cyan",
     ))
 
@@ -568,8 +568,8 @@ def cmd_status(
         f"模型: {ollama_model}  Ollama: {'[green]连接正常[/green]' if ollama_ok else '[red]无法连接[/red]'} ({ollama_url})\n"
         f"专家: {len(builtin)} builtin + {len(custom)} custom = {len(experts)} total\n"
         f"项目: {project_root}\n"
-        f"记忆: {'[green]KAIWU.md 已初始化[/green]' if has_memory else '[yellow]未初始化 (kaiwu init)[/yellow]'}",
-        title="Kaiwu Status",
+        f"记忆: {'[green]KAIWU.md 已初始化[/green]' if has_memory else '[yellow]未初始化 (kwqode init)[/yellow]'}",
+        title="KwQode Status",
         border_style="cyan",
     ))
 
