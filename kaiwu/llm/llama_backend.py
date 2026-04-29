@@ -49,15 +49,19 @@ class LLMBackend:
         n_ctx: int = 8192,
         n_gpu_layers: int = -1,
         verbose: bool = False,
+        api_key: str = "",
     ):
         self.ollama_url = ollama_url.rstrip("/")
         self.ollama_model = ollama_model
+        self.api_key = api_key
         self.verbose = verbose
         self._llm: Optional[object] = None
         self._mode = "none"
         self._is_reasoning = self._detect_reasoning_model(ollama_model)
         self._tps_estimator = None  # set externally by CLI for tok/s tracking
         self._last_elapsed: float = 0.0  # last generate elapsed seconds
+        # Detect if this is an OpenAI-compatible API (not Ollama)
+        self._is_openai_compat = self._detect_openai_compat(ollama_url)
 
         # Prefer native llama.cpp if model_path provided and library available
         if model_path and HAS_LLAMA_CPP:
@@ -76,11 +80,38 @@ class LLMBackend:
 
         # Fallback: Ollama HTTP API
         self._mode = "ollama"
-        logger.info("LLM backend: Ollama HTTP (%s, model=%s)", self.ollama_url, self.ollama_model)
+        if self._is_openai_compat:
+            logger.info("LLM backend: OpenAI-compatible HTTP (%s, model=%s)", self.ollama_url, self.ollama_model)
+        else:
+            logger.info("LLM backend: Ollama HTTP (%s, model=%s)", self.ollama_url, self.ollama_model)
 
-    @property
-    def mode(self) -> str:
-        return self._mode
+    @staticmethod
+    def _detect_openai_compat(url: str) -> bool:
+        """
+        Detect if the URL is an OpenAI-compatible API (not Ollama).
+        Ollama runs on localhost:11434 and has /api/tags endpoint.
+        Everything else is treated as OpenAI-compatible (/v1/chat/completions).
+        """
+        url_lower = url.lower()
+        # Obvious Ollama indicators
+        if "localhost:11434" in url_lower or "127.0.0.1:11434" in url_lower:
+            return False
+        # If URL contains /v1 already, it's OpenAI-compatible
+        if "/v1" in url_lower:
+            return True
+        # If it's not localhost or has a known cloud domain, it's OpenAI-compatible
+        cloud_indicators = [
+            "api.deepseek.com", "api.siliconflow.cn", "api.openai.com",
+            "api.groq.com", "api.together.xyz", "openrouter.ai",
+            "dashscope.aliyuncs.com", "api.moonshot.cn", "api.lingyiwanwu.com",
+        ]
+        for indicator in cloud_indicators:
+            if indicator in url_lower:
+                return True
+        # If it's not localhost at all, assume OpenAI-compatible
+        if "localhost" not in url_lower and "127.0.0.1" not in url_lower:
+            return True
+        return False
 
     def ensure_model_available(self) -> None:
         """Check if model is pulled in Ollama; auto-switch to ModelScope on China networks."""
@@ -213,16 +244,15 @@ class LLMBackend:
         self, messages: list[dict], max_tokens: int,
         temperature: float, stop: Optional[list[str]],
     ) -> str:
+        # Route to OpenAI-compatible API if detected
+        if self._is_openai_compat:
+            return self._chat_openai_compat(messages, max_tokens, temperature, stop)
+
         effective_tokens = max_tokens
         effective_temp = temperature
 
         if self._is_reasoning:
-            # Reasoning models always need the multiplier — thinking tokens
-            # consume num_predict budget even for short-output tasks like Gate.
-            # Disabling thinking (think=False) causes some models (qwen3-vl)
-            # to produce empty output on structured tasks.
             effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
-
             if temperature == 0.0:
                 effective_temp = 0.01
 
@@ -236,7 +266,6 @@ class LLMBackend:
             },
         }
 
-        # Don't pass stop sequences to reasoning models (thinking tokens contain newlines)
         if stop and not self._is_reasoning:
             payload["options"]["stop"] = stop
 
@@ -254,8 +283,6 @@ class LLMBackend:
                 return ""
             raw = msg.get("content", "").strip()
 
-            # qwen3-vl等模型把所有输出放在thinking字段，content为空
-            # 如果content为空但thinking有内容，从thinking提取
             if not raw and self._is_reasoning:
                 thinking = msg.get("thinking", "")
                 if thinking:
@@ -265,6 +292,51 @@ class LLMBackend:
             return self._strip_thinking(raw)
         except Exception as e:
             logger.error("Ollama chat failed: %s", e)
+            raise
+
+    def _chat_openai_compat(
+        self, messages: list[dict], max_tokens: int,
+        temperature: float, stop: Optional[list[str]],
+    ) -> str:
+        """OpenAI-compatible API (/v1/chat/completions)."""
+        effective_temp = temperature
+        if self._is_reasoning and temperature == 0.0:
+            effective_temp = 0.01
+
+        # Build URL: if base already ends with /v1, don't double it
+        base = self.ollama_url.rstrip("/")
+        if base.endswith("/v1"):
+            url = f"{base}/chat/completions"
+        else:
+            url = f"{base}/v1/chat/completions"
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        payload = {
+            "model": self.ollama_model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": effective_temp,
+            "stream": False,
+        }
+
+        if stop and not self._is_reasoning:
+            payload["stop"] = stop
+
+        try:
+            resp = httpx.post(url, json=payload, headers=headers, timeout=360.0)
+            resp.raise_for_status()
+            data = resp.json()
+            choices = data.get("choices", [])
+            if not choices:
+                logger.error("OpenAI API response missing choices: %s", str(data)[:200])
+                return ""
+            raw = choices[0].get("message", {}).get("content", "").strip()
+            return self._strip_thinking(raw)
+        except Exception as e:
+            logger.error("OpenAI-compatible API call failed: %s", e)
             raise
 
     @classmethod

@@ -131,11 +131,17 @@ def _build_pipeline(model_path, ollama_url, ollama_model, project_root, verbose)
                 _search_mod._searxng_ok = False
                 console.print(f"  [yellow][搜索] SearXNG 不可用，降级到 DuckDuckGo[/yellow]")
 
+    # Load API key from config
+    from kaiwu.cli.onboarding import load_config as _load_cfg
+    _cfg = _load_cfg().get("default", {})
+    _api_key = _cfg.get("api_key", "")
+
     llm = LLMBackend(
         model_path=model_path,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
         verbose=verbose,
+        api_key=_api_key,
     )
     tools = ToolExecutor(project_root=project_root)
     memory = KaiwuMemory()
