@@ -27,6 +27,9 @@ _PATTERNS = [
     re.compile(r'^(?:import|from)\s+\S+', re.MULTILINE),    # import语句
 ]
 
+# CTX-RED-1: 代码块检测正则
+_CODE_BLOCK_RE = re.compile(r'```[\w]*\n(.*?)```', re.DOTALL)
+
 _TAIL_TOKENS = 8192   # 尾部保留token数
 _MASK_MIN = 200       # 短于此token数不掩码
 _HEAD_TURNS = 1       # 保留头部的对话轮数（1=首轮问答）
@@ -146,6 +149,15 @@ class ContextPruner:
                 compressed_middle.append(msg)
                 continue
 
+            # CTX-RED-1：代码块保护，不压缩代码内容
+            if _has_code_block(content):
+                code_only = _extract_code_blocks(content)
+                if code_only:
+                    compressed_middle.append({**msg, "content": code_only})
+                else:
+                    compressed_middle.append(msg)
+                continue
+
             if role == "tool":
                 # tool输出：提取关键词
                 keywords = _extract_keywords(content)
@@ -191,3 +203,25 @@ class ContextPruner:
             logger.warning("[pruner] 耗时 %.2fms 超过5ms红线", elapsed_ms)
 
         return result
+
+
+# ── CTX-RED-1: 代码块保护辅助函数 ──
+
+def _has_code_block(text: str) -> bool:
+    """检测文本是否包含代码块（```包裹）"""
+    return bool(_CODE_BLOCK_RE.search(text))
+
+
+def _extract_code_blocks(text: str) -> str:
+    """
+    提取所有代码块内容，去掉解释文字。
+    CTX-RED-1：代码块内容不压缩，保持精确。
+    """
+    blocks = _CODE_BLOCK_RE.findall(text)
+    if not blocks:
+        return ""
+    # 重新用```包裹，保留原始格式（最多保留3个代码块）
+    result_parts = []
+    for block in blocks[:3]:
+        result_parts.append(f"```\n{block.rstrip()}\n```")
+    return "\n\n".join(result_parts)

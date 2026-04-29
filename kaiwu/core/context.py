@@ -52,3 +52,14 @@ class TaskContext:
 
     # KWCODE.md injected rules (populated by orchestrator)
     kwcode_rules: str = ""
+
+    # ── 多任务编排（TaskPlanner/TaskCompiler使用）──
+    # 子任务执行结果，供下游子任务读取
+    # shape: {"t1": {"success": bool, "files_modified": [...], "explanation": str, "patches": [...], "search_data": str}}
+    subtask_results: dict = field(default_factory=dict)
+
+    # 当前子任务ID
+    current_task_id: str = ""
+
+    # 上游依赖结果摘要（Active Context，≤2K tokens，供Gate/Generator看）
+    upstream_summary: str = ""
