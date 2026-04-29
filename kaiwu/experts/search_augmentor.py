@@ -110,9 +110,10 @@ class SearchAugmentorExpert:
 
     @staticmethod
     def _rerank_results(query: str, results: list[dict]) -> list[dict]:
-        """BM25 rerank: rescore search results by relevance to original query."""
+        """BM25 rerank, then Cross-Encoder rerank if available (FLEX-2)."""
         if len(results) <= 1:
             return results
+        # Stage 1: BM25 rerank
         try:
             from rank_bm25 import BM25Plus
             corpus = []
@@ -124,9 +125,18 @@ class SearchAugmentorExpert:
             ranked = sorted(
                 zip(results, scores), key=lambda x: x[1], reverse=True
             )
-            return [r for r, _ in ranked]
+            results = [r for r, _ in ranked]
         except Exception:
-            return results
+            pass
+
+        # Stage 2: Cross-Encoder rerank (optional, FLEX-2)
+        try:
+            from kaiwu.search.reranker import rerank
+            results = rerank(query, results, top_k=8)
+        except Exception:
+            pass
+
+        return results
 
     def _extract(self, query: str, raw_results: str) -> str:
         """用LLM从原始搜索结果中提取关键信息。"""

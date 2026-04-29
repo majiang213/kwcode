@@ -307,8 +307,13 @@ class ABTester:
         path = os.path.join(CANDIDATES_DIR, "candidates.json")
         data = {}
         for name, info in self._candidates.items():
+            # Strip non-serializable fields from expert_def
+            expert_def = {
+                k: v for k, v in info["expert_def"].items()
+                if k != "_source"
+            }
             data[name] = {
-                "expert_def": info["expert_def"],
+                "expert_def": expert_def,
                 "gate2_passed": info["gate2_passed"],
                 "gate2_backtest": info.get("gate2_backtest", []),
                 "backtest_success_rate": info.get("backtest_success_rate", 0.0),
@@ -334,3 +339,28 @@ class ABTester:
         except Exception as e:
             logger.warning("Failed to load candidates: %s", e)
             self._candidates = {}
+
+    # ── Prompt Optimization (SE-RED-4: 离线执行，使用外部API) ──
+
+    def run_prompt_optimization(
+        self,
+        expert_name: str,
+        trajectories: list[TaskTrajectory],
+        api_key: str,
+    ) -> bool:
+        """
+        AB测试通过后，分析成功轨迹优化YAML专家的system_prompt。
+        SE-RED-4：使用外部API，用户需要提供API key。
+        FLEX-1：无API key时跳过。
+        """
+        if not api_key:
+            logger.info("[ab_tester] 无API key，跳过prompt优化")
+            return False
+
+        try:
+            from kaiwu.flywheel.prompt_optimizer import PromptOptimizer
+            optimizer = PromptOptimizer(api_key=api_key)
+            return optimizer.optimize_expert(expert_name, trajectories, self.registry)
+        except Exception as e:
+            logger.warning("[ab_tester] prompt优化失败: %s", e)
+            return False

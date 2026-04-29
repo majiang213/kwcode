@@ -223,3 +223,123 @@ def show(project_root: str) -> str:
             return f.read()
     except Exception as e:
         return f"Failed to read PATTERN.md: {e}"
+
+
+# ── Reflexion持久化 (SE-RED-5: 结构化格式) ──
+
+REFLECTION_TEMPLATE = "- [{date}] {task_summary} → {reflection}\n"
+
+_REFLECTION_FILE = "REFLECTION.md"
+
+
+def _reflection_path(project_root: str) -> str:
+    return os.path.join(_kaiwu_dir(project_root), _REFLECTION_FILE)
+
+
+def _read_reflection(project_root: str) -> str:
+    path = _reflection_path(project_root)
+    if not os.path.exists(path):
+        return "# KWCode Pattern Memory\n"
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return "# KWCode Pattern Memory\n"
+
+
+def _write_reflection(project_root: str, content: str):
+    _ensure_dir(project_root)
+    path = _reflection_path(project_root)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        logger.warning("Failed to write REFLECTION.md: %s", e)
+
+
+def save_reflection(
+    project_root: str,
+    expert_type: str,
+    task_summary: str,
+    reflection: str,
+    success: bool,
+):
+    """
+    把Reflection结果持久化到REFLECTION.md。
+    SE-RED-5：结构化格式，不是自由文本。
+    """
+    from datetime import date as date_mod
+
+    # 根据成败选择section
+    if success:
+        section = f"## {expert_type} 注意事项"
+        prefix = "注意"
+    else:
+        section = f"## {expert_type} 失败模式"
+        prefix = "根因"
+
+    entry = REFLECTION_TEMPLATE.format(
+        date=date_mod.today().isoformat(),
+        task_summary=task_summary[:30],
+        reflection=f"{prefix}：{reflection[:80]}",
+    )
+
+    content = _read_reflection(project_root)
+
+    # 找到对应section，追加条目
+    if section in content:
+        content = content.replace(
+            section + "\n",
+            section + "\n" + entry,
+        )
+    else:
+        content += f"\n{section}\n{entry}"
+
+    # 限制每个section最多20条（防止无限增长）
+    content = _trim_reflection_sections(content, max_entries=20)
+    _write_reflection(project_root, content)
+
+
+def get_reflections_for_plan(project_root: str, expert_type: str) -> str:
+    """
+    /plan时读取相关历史Reflection，作为风险提示。
+    返回最近5条相关记录。
+    """
+    content = _read_reflection(project_root)
+    sections = [
+        f"## {expert_type} 失败模式",
+        f"## {expert_type} 注意事项",
+        f"## {expert_type} 风险点",
+    ]
+
+    result = []
+    for section in sections:
+        if section in content:
+            after = content.split(section)[1].split("##")[0].strip()
+            recent = "\n".join(after.splitlines()[:5])
+            if recent:
+                result.append(f"{section}\n{recent}")
+
+    return "\n\n".join(result)
+
+
+def _trim_reflection_sections(content: str, max_entries: int) -> str:
+    """每个section只保留最新的max_entries条。"""
+    lines = content.splitlines()
+    result = []
+    current_section_entries = 0
+    in_section = False
+
+    for line in lines:
+        if line.startswith("## "):
+            in_section = True
+            current_section_entries = 0
+            result.append(line)
+        elif in_section and line.startswith("- ["):
+            current_section_entries += 1
+            if current_section_entries <= max_entries:
+                result.append(line)
+        else:
+            result.append(line)
+
+    return "\n".join(result)

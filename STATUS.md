@@ -7,9 +7,36 @@
 
 ---
 
-## 当前状态：v0.7.0 (2026-04-29)
+## 当前状态：v0.8.0 (2026-04-29)
 
-全部功能已实现，282/282 测试全绿（265 单元/回归 + 17 E2E 真实模型），已推送 GitHub。
+全部功能已实现，265/265 单元/回归测试全绿。自我强化专家系统已集成。
+
+### v0.8.0 新增：自我强化专家系统
+
+**Python专家升级**
+- ExpertBase基类（`experts/base.py`）：_locate/_generate/_verify三阶段helper
+- BugFixExpert Python版本（`builtin_experts/bugfix_expert.py`）：TRIGGER+run()+test()三段式
+- Registry支持Python专家加载，Python优先级高于同名yaml
+- SE-RED-1保护：TRIGGER和test()不可被LLM修改
+
+**SelfImprovingOptimizer（飞轮自我强化）**
+- 积累5次成功轨迹 → Opus/Sonnet API分析 → 生成新run()代码
+- 三道门验证：语法检查 → 后端测试(test()) → 回测
+- SE-RED-3：修改前备份，失败自动回滚
+- SE-RED-4：离线执行，不在用户任务流程中
+- FLEX-1：无API key时跳过，基本功能不受影响
+
+**Reflexion持久化**
+- 任务完成后（成功/失败）自动写入REFLECTION.md
+- SE-RED-5：结构化格式（日期+摘要+根因/注意）
+- /plan时自动读取历史Reflection作为风险提示
+- 每section最多20条，防止无限增长
+
+**Cross-Encoder搜索重排**
+- `search/reranker.py`：cross-encoder/ms-marco-MiniLM-L-6-v2（82MB CPU）
+- 集成到搜索管道：BM25重排后再Cross-Encoder精排
+- FLEX-2：sentence-transformers未安装或CPU慢(>2s)时自动跳过
+- 可选依赖：`pip install kwcode[rerank]`
 
 ### 已完成功能清单
 

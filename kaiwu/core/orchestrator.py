@@ -203,6 +203,8 @@ class PipelineOrchestrator:
                 self._record_value(project_root, gate_result, True, elapsed, ctx)
                 # P2: Milestone check
                 self._check_milestone(on_status)
+                # Reflexion持久化：成功时也记录注意事项
+                self._persist_reflection(project_root, ctx, gate_result, success=True)
                 return {
                     "success": True,
                     "context": ctx,
@@ -268,6 +270,8 @@ class PipelineOrchestrator:
         self._record_ab_result(ab_candidate_name, ab_used_new, False, elapsed, on_status)
         # P2: Value tracking (local SQLite)
         self._record_value(project_root, gate_result, False, elapsed, ctx)
+        # Reflexion持久化：失败时记录根因
+        self._persist_reflection(project_root, ctx, gate_result, success=False)
         return {
             "success": False,
             "context": ctx,
@@ -445,3 +449,19 @@ class PipelineOrchestrator:
                 self._notifier.queue_milestone(total, expert_count, 0.0)
         except Exception as e:
             logger.debug("Milestone check failed (non-blocking): %s", e)
+
+    def _persist_reflection(self, project_root, ctx, gate_result, success):
+        """Reflexion持久化：任务完成后写入REFLECTION.md（非阻塞）。"""
+        try:
+            if not ctx.reflection:
+                return
+            from kaiwu.memory.pattern_md import save_reflection
+            save_reflection(
+                project_root=project_root,
+                expert_type=gate_result.get("expert_type", "unknown"),
+                task_summary=ctx.user_input[:30],
+                reflection=ctx.reflection,
+                success=success,
+            )
+        except Exception as e:
+            logger.debug("Reflection persistence failed (non-blocking): %s", e)

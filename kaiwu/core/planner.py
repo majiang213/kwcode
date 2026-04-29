@@ -95,6 +95,14 @@ class Planner:
             project_root=ctx.project_root,
         )
 
+        # 读取历史Reflexion作为风险提示
+        historical_reflections = ""
+        try:
+            from kaiwu.memory.pattern_md import get_reflections_for_plan
+            historical_reflections = get_reflections_for_plan(ctx.project_root, expert_type)
+        except Exception:
+            pass
+
         # Overall risk
         risk = estimate_risk(
             step_type=expert_type,
@@ -166,6 +174,9 @@ class Planner:
                     risk_reason="不修改文件",
                 ))
 
+        # 注入历史Reflexion到plan展示
+        self._historical_reflections = historical_reflections
+
         return steps
 
     def print_plan(self, steps: list[PlanStep], console):
@@ -203,6 +214,14 @@ class Planner:
             console.print("  [red]⚠ 此任务包含高风险步骤，建议先备份或拆分执行[/red]")
         elif max_risk.risk == "Medium":
             console.print("  [yellow]△ 此任务有一定风险，请确认修改范围[/yellow]")
+
+        # 显示历史Reflexion风险提示
+        reflections = getattr(self, "_historical_reflections", "")
+        if reflections:
+            console.print("  [dim]── 历史经验 ──[/dim]")
+            for line in reflections.splitlines():
+                if line.strip():
+                    console.print(f"  [dim]{line}[/dim]")
 
     def _preview_locator(self, ctx: TaskContext) -> tuple[list[str], list[str]]:
         """Read-only preview of locator results for planning."""
