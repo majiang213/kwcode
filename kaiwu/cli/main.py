@@ -338,12 +338,13 @@ REPL_COMMANDS = {
     "/cd":      "切换项目目录 (用法: /cd /path/to/project)",
     "/experts": "列出已注册专家",
     "/plan":    "计划模式 (用法: /plan <任务> 或 /plan 后输入任务)",
+    "/multi":   "多任务模式 (用法: /multi 后按提示输入多个任务)",
     "/api":     "API配置 (用法: /api show | /api temp <url> | /api default <url>)",
     "/exit":    "退出",
 }
 
 
-VERSION = "0.7.0"
+VERSION = "0.9.0"
 
 # ── Shadow/重影大字 KAIWU ──
 _KAIWU_SHADOW = [
@@ -585,6 +586,9 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
                     plan_next = True
                     console.print("  [dim]下一个任务将先显示计划[/dim]")
 
+            elif cmd == "/multi":
+                _handle_multi_command(arg, gate, orchestrator, project_root, console)
+
             elif cmd == "/api":
                 api_parts = user_input.split()
                 result = _handle_api_command(api_parts, ollama_url, ollama_model)
@@ -652,6 +656,171 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose):
 def _escape_html(text: str) -> str:
     """Escape HTML special chars for prompt_toolkit HTML."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+# ── /multi command handler ───────────────────────────────────
+
+def _handle_multi_command(arg: str, gate, orchestrator, project_root: str, console):
+    """
+    /multi 多任务模式。支持两种输入方式：
+    1. /multi 后交互式逐条输入（空行结束）
+    2. /multi task1 ; task2 ; task3（分号分隔）
+
+    依赖关系用 -> 表示：task1 -> task2 表示 task2 依赖 task1。
+    无 -> 的任务之间并行执行。
+    """
+    from kaiwu.core.task_compiler import TaskCompiler
+    from rich.progress import Progress, SpinnerColumn, TextColumn
+
+    tasks = []
+
+    if arg and ";" in arg:
+        # 分号分隔模式
+        raw_tasks = [t.strip() for t in arg.split(";") if t.strip()]
+        tasks = _parse_multi_tasks(raw_tasks)
+    elif arg and "->" in arg:
+        # 单行依赖链模式: task1 -> task2 -> task3
+        raw_tasks = [t.strip() for t in arg.split("->") if t.strip()]
+        tasks = _parse_chain_tasks(raw_tasks)
+    elif arg:
+        # 单个任务，直接执行（等同于普通输入）
+        tasks = [{"id": "t1", "input": arg, "depends_on": []}]
+    else:
+        # 交互式输入
+        console.print("  [dim]输入多个任务（每行一个，空行结束）[/dim]")
+        console.print("  [dim]前缀 '>' 表示依赖上一个任务（串行），否则并行[/dim]")
+        console.print("  [dim]示例：[/dim]")
+        console.print("  [dim]  给函数add加注释[/dim]")
+        console.print("  [dim]  给函数sub加注释[/dim]")
+        console.print("  [dim]  >给修改后的代码写测试  (依赖前面的任务)[/dim]")
+        console.print()
+
+        raw_lines = []
+        while True:
+            try:
+                line = input("  + ").strip()
+            except (KeyboardInterrupt, EOFError):
+                console.print("  [dim]取消[/dim]")
+                return
+            if not line:
+                break
+            raw_lines.append(line)
+
+        if not raw_lines:
+            console.print("  [yellow]未输入任何任务[/yellow]")
+            return
+
+        tasks = _parse_interactive_tasks(raw_lines)
+
+    if not tasks:
+        console.print("  [yellow]未解析到有效任务[/yellow]")
+        return
+
+    # 展示任务计划
+    parallel_count = sum(1 for t in tasks if not t["depends_on"])
+    serial_count = sum(1 for t in tasks if t["depends_on"])
+    console.print(f"\n  [bold]多任务计划[/bold]：{len(tasks)} 个任务（{parallel_count} 并行 + {serial_count} 串行）")
+    for t in tasks:
+        dep_str = f" [dim](依赖 {', '.join(t['depends_on'])})[/dim]" if t["depends_on"] else " [green](并行)[/green]"
+        console.print(f"  {t['id']}: {t['input'][:60]}{dep_str}")
+    console.print()
+
+    # 执行
+    compiler = TaskCompiler(orchestrator=orchestrator, gate=gate, project_root=project_root)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        ptask = progress.add_task("执行多任务...", total=None)
+
+        def _on_status(stage, detail):
+            progress.update(ptask, description=f"{detail[:60]}")
+
+        result = compiler.compile_and_run(tasks, on_status=_on_status)
+
+    # 展示结果
+    console.print()
+    if result["success"]:
+        console.print(f"  [bold green]✓ 全部完成[/bold green] ({result['elapsed']:.1f}s)")
+    else:
+        failed = [tid for tid, r in result["results"].items() if not r["success"]]
+        passed = [tid for tid, r in result["results"].items() if r["success"]]
+        console.print(f"  [bold yellow]部分完成[/bold yellow] ({result['elapsed']:.1f}s)")
+        if passed:
+            console.print(f"  成功: {', '.join(passed)}")
+        if failed:
+            console.print(f"  [red]失败: {', '.join(failed)}[/red]")
+
+    # 逐任务摘要
+    for tid, r in result["results"].items():
+        ctx = r.get("context")
+        if r["success"] and ctx and ctx.generator_output:
+            files = [p.get("file", "") for p in ctx.generator_output.get("patches", [])]
+            if files:
+                console.print(f"  {tid}: 修改了 {', '.join(files[:3])}")
+        elif not r["success"]:
+            err = r.get("error", "")[:60]
+            console.print(f"  {tid}: [red]{err}[/red]")
+
+
+def _parse_multi_tasks(raw_tasks: list[str]) -> list[dict]:
+    """解析分号分隔的任务列表。全部并行（无依赖）。"""
+    tasks = []
+    for i, task_input in enumerate(raw_tasks, 1):
+        tasks.append({
+            "id": f"t{i}",
+            "input": task_input,
+            "depends_on": [],
+        })
+    return tasks
+
+
+def _parse_chain_tasks(raw_tasks: list[str]) -> list[dict]:
+    """解析 -> 分隔的依赖链。每个任务依赖前一个。"""
+    tasks = []
+    for i, task_input in enumerate(raw_tasks, 1):
+        deps = [f"t{i-1}"] if i > 1 else []
+        tasks.append({
+            "id": f"t{i}",
+            "input": task_input,
+            "depends_on": deps,
+        })
+    return tasks
+
+
+def _parse_interactive_tasks(raw_lines: list[str]) -> list[dict]:
+    """
+    解析交互式输入的任务。
+    以 '>' 开头的任务依赖前面所有无依赖的任务（串行）。
+    不以 '>' 开头的任务之间并行。
+    """
+    tasks = []
+    last_parallel_ids = []
+
+    for i, line in enumerate(raw_lines, 1):
+        tid = f"t{i}"
+        if line.startswith(">"):
+            # 依赖前面所有并行任务
+            task_input = line[1:].strip()
+            deps = list(last_parallel_ids) if last_parallel_ids else ([f"t{i-1}"] if i > 1 else [])
+            tasks.append({
+                "id": tid,
+                "input": task_input,
+                "depends_on": deps,
+            })
+            last_parallel_ids = [tid]  # 后续的 > 任务依赖这个
+        else:
+            tasks.append({
+                "id": tid,
+                "input": line,
+                "depends_on": [],
+            })
+            last_parallel_ids.append(tid)
+
+    return tasks
 
 
 def _maybe_show_weekly_stats(console):
