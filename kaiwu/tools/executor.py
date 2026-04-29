@@ -1,11 +1,11 @@
 """
 Tool executor: self-implemented per FLEX-1 fallback.
-Provides read_file, write_file, run_bash, list_dir, git_commit.
+Provides read_file, write_file, run_bash, list_dir, git_commit, ssh_*.
 Interface is fixed (RED-4: transparent to user).
 
 Guardrails:
 - Dangerous commands blocked (rm -rf, git push --force, drop database, etc.)
-- Sensitive files protected (.env, credentials.json, id_rsa, etc.)
+- Sensitive files auto-backed up before overwrite (.env, credentials.json, etc.)
 - Write operations confined to project_root
 """
 
@@ -40,6 +40,7 @@ class ToolExecutor:
 
     def __init__(self, project_root: str = "."):
         self.project_root = os.path.abspath(project_root)
+        self._ssh_session = None  # Persistent SSH session
 
     def read_file(self, path: str) -> str:
         """Read file content. Path can be relative to project_root or absolute."""
@@ -200,3 +201,67 @@ class ToolExecutor:
             if protected in path_lower:
                 return True
         return False
+
+    # ── SSH Session (persistent, paramiko) ──
+
+    def ssh_connect(
+        self,
+        host: str,
+        port: int = 22,
+        username: str = "root",
+        password: Optional[str] = None,
+        key_path: Optional[str] = None,
+    ) -> tuple[bool, str]:
+        """建立持久 SSH 连接。后续用 ssh_exec 执行命令。"""
+        from kaiwu.tools.ssh_session import SSHSession
+
+        # 关闭旧连接
+        if self._ssh_session and self._ssh_session.connected:
+            self._ssh_session.close()
+
+        self._ssh_session = SSHSession(
+            host=host, port=port, username=username,
+            password=password, key_path=key_path,
+        )
+        return self._ssh_session.connect()
+
+    def ssh_exec(self, command: str, timeout: float = 60.0) -> tuple[str, str, int]:
+        """在远程 SSH 会话中执行命令。返回 (stdout, stderr, returncode)。"""
+        if not self._ssh_session or not self._ssh_session.connected:
+            return "", "[ERROR] SSH未连接，请先用 ssh_connect 建立连接", -1
+
+        # Guardrail: 远程也拦截危险命令
+        blocked = self._check_dangerous(command)
+        if blocked:
+            logger.warning("[guardrail] Blocked dangerous SSH command: %s", command[:80])
+            return "", f"[BLOCKED] 远程危险操作被拦截: {blocked}", -2
+
+        result = self._ssh_session.exec(command, timeout=timeout)
+        return result["stdout"], result["stderr"], result["returncode"]
+
+    def ssh_upload(self, local_path: str, remote_path: str) -> tuple[bool, str]:
+        """上传本地文件到远程 SSH 服务器。"""
+        if not self._ssh_session or not self._ssh_session.connected:
+            return False, "SSH未连接"
+        full_local = self._resolve(local_path)
+        return self._ssh_session.upload(full_local, remote_path)
+
+    def ssh_download(self, remote_path: str, local_path: str) -> tuple[bool, str]:
+        """从远程 SSH 服务器下载文件到本地。"""
+        if not self._ssh_session or not self._ssh_session.connected:
+            return False, "SSH未连接"
+        full_local = self._resolve(local_path)
+        return self._ssh_session.download(remote_path, full_local)
+
+    def ssh_close(self) -> str:
+        """关闭 SSH 连接。"""
+        if self._ssh_session:
+            self._ssh_session.close()
+            self._ssh_session = None
+            return "SSH连接已关闭"
+        return "无活跃SSH连接"
+
+    @property
+    def ssh_connected(self) -> bool:
+        """检查 SSH 是否已连接。"""
+        return bool(self._ssh_session and self._ssh_session.connected)
