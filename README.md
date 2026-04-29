@@ -419,17 +419,31 @@ kaiwu/
 
 ## 参考文献
 
-| 论文 | 会议 | KWCode 中的应用 |
-|------|------|----------------|
-| Agentless | ICSE 2025 | 确定性流水线优于复杂 agent |
-| CodeCompass | arXiv:2602.20048, 2026 | 图遍历 G3 任务 99.4% |
-| KGCompass | arXiv:2503.21710, 2025 | 多跳图遍历定位 |
-| Debug2Fix | ICML 2026 | 弱模型+调试器 > 强模型裸跑 |
-| LLMCompiler | ICML 2024 | DAG 任务分解+并行调度 |
-| EE-MCP | NeurIPS 2025 | 任务轨迹经验提取 |
-| SICA | arXiv:2504.15228 | 自我改进编码代理 |
-| AgentCoder | EMNLP 2023 | 多专家分工验证 |
-| Reflexion | NeurIPS 2023 | 失败模式持久化 |
+| 论文/项目 | 来源 | KWCode 中的应用 |
+|-----------|------|----------------|
+| **Agentless** | Xia et al., ICSE 2025 | 确定性流水线优于复杂 agent，KWCode 整体架构基于此思路 |
+| **CodeCompass** | arXiv:2602.20048, 2026 | 图遍历 G3 任务 99.4%，KWCode 的 AST 调用图定位直接借鉴 |
+| **KGCompass** | Yang et al., arXiv:2503.21710, 2025 | 多跳图遍历定位，验证了调用图展开的有效性 |
+| **Debug2Fix** | Garg & Huang (Microsoft), ICML 2026 | 弱模型+调试器 > 强模型裸跑，KWCode 的 Debug Subagent 直接实现此论文思路 |
+| **LLMCompiler** | Kim et al., ICML 2024 | DAG 任务分解+并行调度，KWCode 的 TaskCompiler 借鉴其调度思想（自研轻量实现） |
+| **EE-MCP** | NeurIPS 2025 | 任务轨迹经验提取，KWCode 飞轮的轨迹→模式→专家生成流程借鉴此机制 |
+| **SICA** | arXiv:2504.15228, 2025 | 自我改进编码代理，KWCode 的 Prompt Optimizer 借鉴其自我优化循环 |
+| **Self-Play** | arXiv:2502.14948, 2025 | 自博弈提升代码能力，飞轮 AB 测试门的设计参考 |
+| **Reflexion** | Shinn et al., NeurIPS 2023 | 失败模式持久化+重试时注入，KWCode 的 REFLECTION.md 直接实现 |
+| **AgentCoder** | Huang et al., EMNLP 2023 | 多专家分工验证，KWCode 的 Gate→专家流水线参考此分工模式 |
+| **Agent Psychometrics** | arXiv:2604.00594, 2026 | 任务特征预测 agent 成功率，KWCode 的模型能力自适应参考此研究 |
+
+### 借鉴的开源项目
+
+| 项目 | 借鉴点 |
+|------|--------|
+| **Claude Code** (Anthropic) | CLAUDE.md 项目规则文件 → KWCode 的 KWCODE.md；Checkpoint 文件快照机制 |
+| **Hermes** (Anthropic) | REPL 交互模式、/plan 计划模式的交互设计 |
+| **OpenCode** | 本地模型 coding agent 的产品形态参考 |
+| **SearXNG** | 零 API key 的本地搜索引擎，KWCode 集成为搜索后端 |
+| **rank-bm25** | BM25Plus 算法实现，用于代码定位和搜索结果重排 |
+| **tree-sitter** | 多语言 AST 解析，用于调用图构建 |
+| **sentence-transformers** | Cross-Encoder 模型，用于搜索结果精排（可选依赖） |
 
 ---
 
