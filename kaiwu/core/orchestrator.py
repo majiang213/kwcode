@@ -191,6 +191,10 @@ class PipelineOrchestrator:
             if success:
                 elapsed = time.time() - start_time
                 checkpoint.discard()  # Clean up snapshot on success
+
+                # Reviewer: 需求对齐审查（非阻塞，不影响成功判定）
+                review_result = self._do_review(ctx, on_status)
+
                 # Save to memory on success (with elapsed for expert/pattern tracking)
                 self.memory.save(project_root, ctx, elapsed=elapsed)
                 # Update expert registry stats
@@ -425,6 +429,23 @@ class PipelineOrchestrator:
                 self._emit(on_status, "debug_done", "未获取到额外调试信息")
         except Exception as e:
             logger.debug("Debug subagent failed (non-blocking): %s", e)
+
+    def _do_review(self, ctx: TaskContext, on_status) -> dict:
+        """Reviewer: 需求对齐审查（非阻塞）。成功后检查代码是否真正满足用户意图。"""
+        try:
+            from kaiwu.experts.reviewer import ReviewerExpert
+            reviewer = ReviewerExpert(llm=self.generator.llm)
+            self._emit(on_status, "review", "审查需求对齐...")
+            result = reviewer.review(ctx)
+            if result.get("aligned"):
+                self._emit(on_status, "review_done", "需求对齐确认")
+            else:
+                gap = result.get("gap", "")
+                self._emit(on_status, "review_gap", f"注意：{gap}")
+            return result
+        except Exception as e:
+            logger.debug("Reviewer failed (non-blocking): %s", e)
+            return {"aligned": True, "confidence": 0.0, "gap": ""}
 
     @staticmethod
     def _emit(callback, stage: str, detail: str):
