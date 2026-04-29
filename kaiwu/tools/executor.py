@@ -53,18 +53,23 @@ class ToolExecutor:
             return f"[ERROR] Read failed: {e}"
 
     def write_file(self, path: str, content: str) -> bool:
-        """Write content to file. Guardrails: protects sensitive files, confines to project_root."""
+        """Write content to file. Guardrails: backs up sensitive files, confines to project_root."""
         full = self._resolve(path)
-
-        # Guardrail: check for protected files
-        if self._is_protected(full):
-            logger.warning("[guardrail] Blocked write to protected file: %s", full)
-            return False
 
         # Guardrail: prevent writing outside project root
         if not full.startswith(self.project_root):
             logger.warning("[guardrail] Blocked write outside project: %s", full)
             return False
+
+        # Guardrail: sensitive files get backed up before overwrite (not blocked)
+        if self._is_protected(full) and os.path.isfile(full):
+            backup_path = full + ".bak"
+            try:
+                import shutil
+                shutil.copy2(full, backup_path)
+                logger.info("[guardrail] Backed up sensitive file: %s → %s", full, backup_path)
+            except Exception as e:
+                logger.warning("[guardrail] Failed to backup %s: %s", full, e)
 
         try:
             os.makedirs(os.path.dirname(full), exist_ok=True)
