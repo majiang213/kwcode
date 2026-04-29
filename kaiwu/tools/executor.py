@@ -2,6 +2,11 @@
 Tool executor: self-implemented per FLEX-1 fallback.
 Provides read_file, write_file, run_bash, list_dir, git_commit.
 Interface is fixed (RED-4: transparent to user).
+
+Guardrails:
+- Dangerous commands blocked (rm -rf, git push --force, drop database, etc.)
+- Sensitive files protected (.env, credentials.json, id_rsa, etc.)
+- Write operations confined to project_root
 """
 
 import logging
@@ -15,6 +20,23 @@ logger = logging.getLogger(__name__)
 
 class ToolExecutor:
     """Deterministic tool execution layer. No LLM involved."""
+
+    # ── Guardrails ──
+
+    DANGEROUS_PATTERNS = [
+        "rm -rf", "rm -r /", "rmdir /s",
+        "git push --force", "git push -f",
+        "git reset --hard",
+        "drop database", "drop table", "truncate table",
+        "format c:", "del /f /s /q",
+        "> /dev/null", "mkfs",
+    ]
+
+    PROTECTED_FILES = [
+        ".env", ".env.local", ".env.production",
+        "credentials.json", "secrets.yaml", "id_rsa",
+        ".ssh/", "token.json", "service_account.json",
+    ]
 
     def __init__(self, project_root: str = "."):
         self.project_root = os.path.abspath(project_root)
@@ -31,8 +53,19 @@ class ToolExecutor:
             return f"[ERROR] Read failed: {e}"
 
     def write_file(self, path: str, content: str) -> bool:
-        """Write content to file. Creates parent dirs if needed."""
+        """Write content to file. Guardrails: protects sensitive files, confines to project_root."""
         full = self._resolve(path)
+
+        # Guardrail: check for protected files
+        if self._is_protected(full):
+            logger.warning("[guardrail] Blocked write to protected file: %s", full)
+            return False
+
+        # Guardrail: prevent writing outside project root
+        if not full.startswith(self.project_root):
+            logger.warning("[guardrail] Blocked write outside project: %s", full)
+            return False
+
         try:
             os.makedirs(os.path.dirname(full), exist_ok=True)
             with open(full, "w", encoding="utf-8") as f:
@@ -46,8 +79,14 @@ class ToolExecutor:
     def run_bash(self, command: str, cwd: Optional[str] = None, timeout: int = 60) -> tuple[str, str, int]:
         """
         Run a shell command. Returns (stdout, stderr, returncode).
-        Timeout in seconds (default 60).
+        Guardrails: blocks dangerous commands.
         """
+        # Guardrail: check for dangerous patterns
+        blocked = self._check_dangerous(command)
+        if blocked:
+            logger.warning("[guardrail] Blocked dangerous command: %s", command[:80])
+            return "", f"[BLOCKED] 危险操作被拦截: {blocked}。如需执行请手动在终端运行。", -2
+
         work_dir = cwd or self.project_root
         try:
             result = subprocess.run(
@@ -55,7 +94,6 @@ class ToolExecutor:
                 shell=True,
                 cwd=work_dir,
                 capture_output=True,
-                text=True,
                 timeout=timeout,
                 encoding="utf-8",
                 errors="replace",
@@ -106,8 +144,9 @@ class ToolExecutor:
                 dirnames.clear()
                 continue
             indent = "  " * depth
-            dirname = os.path.basename(dirpath) or os.path.basename(root)
-            lines.append(f"{indent}{dirname}/")
+            dirname = os.path.basename(dirpath)
+            if depth > 0:
+                lines.append(f"{indent}{dirname}/")
             for fname in sorted(filenames):
                 if count >= max_files:
                     lines.append(f"{indent}  ... (truncated at {max_files} files)")
@@ -116,10 +155,15 @@ class ToolExecutor:
                 count += 1
         return "\n".join(lines)
 
+    def _resolve(self, path: str) -> str:
+        """Resolve path relative to project_root."""
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+        return os.path.normpath(os.path.join(self.project_root, path))
+
     def apply_patch(self, file_path: str, original: str, modified: str) -> bool:
         """Apply a text replacement patch. Exact match only — original is read from file."""
         if not original:
-            # Empty original means codegen (new file) — should use write_file instead
             logger.warning("apply_patch called with empty original, use write_file for new files")
             return False
         full = self._resolve(file_path)
@@ -136,8 +180,18 @@ class ToolExecutor:
             logger.error("Patch apply failed: %s", e)
             return False
 
-    def _resolve(self, path: str) -> str:
-        """Resolve path relative to project_root."""
-        if os.path.isabs(path):
-            return path
-        return os.path.join(self.project_root, path)
+    def _check_dangerous(self, command: str) -> Optional[str]:
+        """Check if command matches dangerous patterns. Returns matched pattern or None."""
+        cmd_lower = command.lower().strip()
+        for pattern in self.DANGEROUS_PATTERNS:
+            if pattern in cmd_lower:
+                return pattern
+        return None
+
+    def _is_protected(self, full_path: str) -> bool:
+        """Check if file path matches protected patterns."""
+        path_lower = full_path.lower().replace("\\", "/")
+        for protected in self.PROTECTED_FILES:
+            if protected in path_lower:
+                return True
+        return False

@@ -4,6 +4,44 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.0.2] - 2026-04-29
+
+### MoE 框架补全：4 个缺失主部件
+
+基于 7 层 Agent 架构审计（Perceive→Remember→Think→Plan→Act→Observe→Guardrails），补全 Observe 层和 Guardrails 层。
+
+**理论来源：**
+- Portal26 Agentic Token Controls (2026)：token 预算管控防止失控消耗
+- Claude Code 4-Layer Memory (2026)：MEMORY.md → Topic Files → Learnings → Patterns
+- Augment Code "Session-End Spec Update" (2026)：会话结束时持久化决策和约束
+- CodeDelegator EPSS (arXiv:2601.14914)：Ephemeral-Persistent State Separation
+- 9 Failure Modes of Agentic AI (ElixirData 2026)：context overflow、function hallucination execution
+
+### Added
+
+- **Token 预算管控** (`llm/llama_backend.py`)：
+  - 每次 LLM 调用自动计数 input/output tokens
+  - `token_usage` 属性查看当前消耗
+  - `set_token_budget(n)` 设置上限，超出抛 BudgetExceededError
+  - OpenAI 兼容 API 使用真实 usage 数据，Ollama 用估算（4 chars/token）
+
+- **Guardrails 护栏** (`tools/executor.py`)：
+  - 危险命令拦截：rm -rf、git push --force、drop database 等 12 种模式
+  - 敏感文件保护：.env、credentials.json、id_rsa 等不可写
+  - 文件范围限制：write_file 不能写到 project_root 之外
+
+- **执行可观测性** (`core/execution_trace.py`)：
+  - ExecutionTrace 结构化记录每步（name、耗时、成功/失败）
+  - 任务完成后 `.summary()` 输出人类可读摘要
+  - 记录 LLM 调用次数和 token 消耗
+
+- **会话连续性** (`memory/session_md.py`)：
+  - 会话结束时自动生成 SESSION.md（最近任务摘要）
+  - 下次启动自动加载，注入 Gate 的 memory_context
+  - 限制 50 行，最新在前
+
+---
+
 ## [1.0.1] - 2026-04-29
 
 ### Gate/Loop/路由优化

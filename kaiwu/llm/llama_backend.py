@@ -15,6 +15,11 @@ from kaiwu.core.network import is_china_network
 
 logger = logging.getLogger(__name__)
 
+
+class BudgetExceededError(Exception):
+    """Raised when token budget is exceeded."""
+    pass
+
 # Try importing llama_cpp; if unavailable, fall back to HTTP-only mode
 try:
     from llama_cpp import Llama, LlamaGrammar
@@ -62,6 +67,11 @@ class LLMBackend:
         self._last_elapsed: float = 0.0  # last generate elapsed seconds
         # Detect if this is an OpenAI-compatible API (not Ollama)
         self._is_openai_compat = self._detect_openai_compat(ollama_url)
+        # Token budget tracking
+        self._total_input_tokens: int = 0
+        self._total_output_tokens: int = 0
+        self._call_count: int = 0
+        self._token_budget: int = 0  # 0 = unlimited
 
         # Prefer native llama.cpp if model_path provided and library available
         if model_path and HAS_LLAMA_CPP:
@@ -112,6 +122,38 @@ class LLMBackend:
         if "localhost" not in url_lower and "127.0.0.1" not in url_lower:
             return True
         return False
+
+    @property
+    def token_usage(self) -> dict:
+        """Return token usage stats for current session."""
+        return {
+            "input_tokens": self._total_input_tokens,
+            "output_tokens": self._total_output_tokens,
+            "total_tokens": self._total_input_tokens + self._total_output_tokens,
+            "call_count": self._call_count,
+        }
+
+    def set_token_budget(self, budget: int):
+        """Set max total tokens for this session. 0 = unlimited."""
+        self._token_budget = budget
+
+    def reset_token_usage(self):
+        """Reset token counters (e.g. at start of new task)."""
+        self._total_input_tokens = 0
+        self._total_output_tokens = 0
+        self._call_count = 0
+
+    def _track_tokens(self, input_tokens: int, output_tokens: int):
+        """Track token usage. Raises BudgetExceededError if over budget."""
+        self._total_input_tokens += input_tokens
+        self._total_output_tokens += output_tokens
+        self._call_count += 1
+        if self._token_budget > 0:
+            total = self._total_input_tokens + self._total_output_tokens
+            if total > self._token_budget:
+                raise BudgetExceededError(
+                    f"Token budget exceeded: {total}/{self._token_budget}"
+                )
 
     def ensure_model_available(self) -> None:
         """Check if model is pulled in Ollama; auto-switch to ModelScope on China networks."""
@@ -289,7 +331,14 @@ class LLMBackend:
                     logger.info("content为空，从thinking字段提取（%d chars）", len(thinking))
                     raw = thinking.strip()
 
+            # Track tokens (estimate for Ollama: ~4 chars per token)
+            input_est = sum(len(m.get("content", "")) for m in messages) // 4
+            output_est = len(raw) // 4
+            self._track_tokens(input_est, output_est)
+
             return self._strip_thinking(raw)
+        except BudgetExceededError:
+            raise
         except Exception as e:
             logger.error("Ollama chat failed: %s", e)
             raise
@@ -334,7 +383,16 @@ class LLMBackend:
                 logger.error("OpenAI API response missing choices: %s", str(data)[:200])
                 return ""
             raw = choices[0].get("message", {}).get("content", "").strip()
+
+            # Track tokens (use API response if available, else estimate)
+            usage = data.get("usage", {})
+            input_tokens = usage.get("prompt_tokens", sum(len(m.get("content", "")) for m in messages) // 4)
+            output_tokens = usage.get("completion_tokens", len(raw) // 4)
+            self._track_tokens(input_tokens, output_tokens)
+
             return self._strip_thinking(raw)
+        except BudgetExceededError:
+            raise
         except Exception as e:
             logger.error("OpenAI-compatible API call failed: %s", e)
             raise
