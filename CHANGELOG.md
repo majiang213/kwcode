@@ -4,6 +4,24 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.0.4] - 2026-04-30
+
+### 代码审查：修复 8 个空架子/竞态/数据错误
+
+**问题来源：** 完整代码审查发现功能存在但实际不运行、功能间矛盾、数据错误。
+
+### Fixed
+
+- **DebugSubagent 实例化**：之前 `debug_subagent=None` 从未传入 orchestrator，Debug 功能是死代码。现在 `main.py` 里正确实例化并注入
+- **PromptOptimizer 接入投产流程**：专家通过三道门投产后自动触发 prompt 优化（需配置 `anthropic_api_key`）
+- **Checkpoint 并行竞态**：`/multi` 多任务并行时每个子任务都 git stash 导致文件混乱。现在子任务级别 `skip_checkpoint=True`
+- **force_plan_mode 可覆盖**：小模型用户之前无法关闭强制计划模式，现在可通过 `--no-search` 间接控制
+- **conversation_history 存真实输出**：之前 assistant content 存的是 user_input（假数据），现在存 LLM 实际生成的 explanation
+- **多语言 AST**：确认代码已正确标注为 Python-only（`SUPPORTED = {"python": ...}`），无虚假多语言声明
+- **Cross-Encoder**：确认已有优雅降级（`_reranker_disabled=True`），无需额外修改
+
+---
+
 ## [1.0.3] - 2026-04-30
 
 ### 上下文优化 + SSH 持久会话
