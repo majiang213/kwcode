@@ -315,8 +315,8 @@ class Planner:
             temperature=0.0,
         )
 
-        # 解析JSON
-        json_match = _re.search(r'\[.*?\]', raw, _re.DOTALL)
+        # 解析JSON（用贪婪匹配，因为数组内有嵌套[]）
+        json_match = _re.search(r'\[.*\]', raw, _re.DOTALL)
         if not json_match:
             return None
 
