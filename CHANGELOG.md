@@ -36,13 +36,15 @@ BugFix · FastAPI · TestGen · API · DeepSeekAPI · Docstring · MyBatis · Of
 - **DAG TaskCompiler** (`core/task_compiler.py`)：串行+并行多任务调度
 - **`/multi` 命令**：CLI 多任务模式（分号并行、箭头串行、交互式混合）
 - **Debug Subagent** (`experts/debug_subagent.py`)：verifier 失败后 sys.settrace 捕获运行时变量
-- **Prompt Optimizer** (`flywheel/prompt_optimizer.py`)：飞轮优化 YAML/SKILL.md 的领域知识内容
+- **Prompt Optimizer** (`flywheel/prompt_optimizer.py`)：飞轮优化 SKILL.md 的领域知识内容
 - **Cross-Encoder 重排** (`search/reranker.py`)：可选搜索结果精排
 - **Reflexion 持久化** (`memory/pattern_md.py`)：REFLECTION.md 结构化记录 + /plan 风险注入
+- **OpenAI 兼容 API 自动检测**：LLMBackend 根据 URL 自动判断用 `/api/chat`（Ollama）还是 `/v1/chat/completions`（DeepSeek/硅基流动等）
 
 ### Changed
 
-- 专家格式从 flat YAML 升级为 SKILL.md 目录（向后兼容已移除，全量迁移）
+- 专家格式从 flat YAML 升级为 SKILL.md 目录（全量迁移，旧 YAML 已删除）
+- LLMBackend 支持 api_key 参数，云端 API 自动带 Authorization header
 - 版本号从 0.7.0 → 1.0.0
 - 测试数量：282 → 311
 
@@ -51,12 +53,18 @@ BugFix · FastAPI · TestGen · API · DeepSeekAPI · Docstring · MyBatis · Of
 - 15 个旧 `.yaml` 专家文件（已全部转为 SKILL.md 目录）
 - Python 专家系统（ExpertBase、BugFixExpert.py、SelfImprovingOptimizer）— 方向错误，v0.8.0 加入后 v0.9.0 移除
 
+### Fixed
+
+- LLMBackend 硬编码 `/api/chat` 导致云端 API（DeepSeek 等）404 的问题
+- 初始化配置时验证用 `/v1/chat/completions` 但实际请求用 `/api/chat` 的不一致
+
 ### Architecture Decisions
 
 - **元专家按原子能力分，不按业务领域分**：研究证明 MoE 路由反映隐状态几何结构而非领域专业性（arXiv:2604.09780）
 - **领域知识是注入层，不是独立流水线**：所有任务走同一条 Locator→Generator→Verifier 管线，区别只在 system_prompt
 - **渐进式加载解决噪音问题**：Gate 只看 metadata（~1500 token/15专家），不全量加载所有知识
 - **Reviewer 非阻塞**：审查结果不回滚代码，只提示用户注意 gap
+- **弱模型 + Skill 胜过强模型裸跑**：tessl.io 880次评测证明 Haiku+Skill(84.3%) > Opus裸跑(80.5%)
 
 ---
 

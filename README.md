@@ -386,7 +386,7 @@ git clone https://github.com/val1813/kwcode.git
 cd kwcode
 pip install -e ".[dev]"
 python -m pytest kaiwu/tests/ -v --ignore=kaiwu/tests/bench_tasks
-# 292 tests should pass
+# 311 tests should pass
 ```
 
 ### 项目结构
@@ -402,10 +402,11 @@ kaiwu/
 │   ├── checkpoint.py        # 文件快照
 │   └── model_capability.py  # 模型能力自适应
 ├── experts/
-│   ├── locator.py           # BM25 + 调用图定位
-│   ├── generator.py         # 代码生成（只改必要部分）
-│   ├── verifier.py          # 语法检查 + pytest
-│   ├── debug_subagent.py    # 运行时调试（sys.settrace）
+│   ├── locator.py           # [元专家] BM25 + 调用图定位
+│   ├── generator.py         # [元专家] 代码生成（只改必要部分）
+│   ├── verifier.py          # [元专家] 语法检查 + pytest
+│   ├── debug_subagent.py    # [元专家] 运行时调试（sys.settrace）
+│   ├── reviewer.py          # [元专家] 需求对齐审查
 │   └── search_augmentor.py  # 搜索增强 + BM25 + CE 重排
 ├── search/
 │   ├── reranker.py          # Cross-Encoder 可选重排
@@ -415,10 +416,11 @@ kaiwu/
 │   ├── trajectory_collector.py  # 轨迹记录
 │   ├── pattern_detector.py      # 模式检测（Gate 1）
 │   ├── ab_tester.py             # 三道门验证
-│   └── prompt_optimizer.py      # YAML system_prompt 自动优化
+│   └── prompt_optimizer.py      # SKILL.md 领域知识自动优化
 ├── memory/
 │   └── pattern_md.py        # PATTERN.md + REFLECTION.md
-├── registry/                # 15 个预置 YAML 专家
+├── builtin_experts/         # 15 个 SKILL.md 领域知识目录
+├── registry/                # 专家注册表（加载 SKILL.md）
 ├── ast_engine/              # tree-sitter AST + 调用图
 └── stats/                   # 价值量化（SQLite）
 ```
@@ -460,8 +462,8 @@ kaiwu/
 以下关键设计决策来自项目早期的架构讨论和实验：
 
 - **不用 ReAct 循环，用确定性流水线**：小模型在 ReAct 循环里容易失控，确定性流水线每步输入输出格式固定，LLM 只在 Generator 出现一次
-- **专家是 YAML 知识载体，不是 Python 类**：早期实验过 Python 专家（ExpertBase 继承体系），发现把领域知识和执行逻辑混在一起方向错误，回退到纯 YAML
-- **不用 LoRA 训练专家**：早期实验证明 LoRA 效果差、换模型要重训，改为 system_prompt 自动进化
+- **专家是 SKILL.md 知识载体，不是 Python 类**：早期实验过 Python 专家（ExpertBase 继承体系），发现把领域知识和执行逻辑混在一起方向错误，回退到 SKILL.md 渐进式加载
+- **不用 LoRA 训练专家**：早期实验证明 LoRA 效果差、换模型要重训，改为 SKILL.md 内容自动进化
 - **任务拆分不枚举模板**：参考 OpenHands V1 的 agent delegation，复杂任务让 LLM 一次性输出 DAG JSON，失败退化为单任务
 - **专家约束越严格越好**：不是教 8B 模型做什么，是限制它只能在什么范围内做。约束越严格，犯错空间越小
 
@@ -469,28 +471,37 @@ kaiwu/
 
 ## 参与贡献
 
-**KWCode 是中国开发者做的，也需要中国开发者一起来完善。**
+**KWCode 是中国开发者做的，欢迎 fork 后自由修改优化。**
 
-### 最需要的贡献
+### 推荐方式
 
-**新增预置专家**（最简单，编辑一个 YAML 文件）：
+1. **Fork 本仓库**，在你自己的分支上修改
+2. 跑通测试：`python -m pytest kaiwu/tests/ --ignore=kaiwu/tests/bench_tasks`
+3. 提交 PR 或直接在你的 fork 上用
 
-```yaml
-# 急需认领：
-Vue3Expert / DjangoExpert / GoGinExpert / RustActixExpert
-K8sExpert / DockerExpert / RedisExpert / MySQLExpert
-```
+### 可以做的事
+
+**新增领域知识**（最简单，创建一个 SKILL.md 目录）：
 
 ```bash
-kwcode expert create MyExpert  # 生成模板
-# 编辑 ~/.kaiwu/experts/MyExpert.yaml
-# 提交 PR
+# 在 kaiwu/builtin_experts/ 下创建新目录
+mkdir kaiwu/builtin_experts/vue3
+# 编辑 SKILL.md（参考现有专家格式）
 ```
 
-**其他贡献方向**：
+急需的领域知识：Vue3 · Django · Go Gin · Rust Actix · K8s · Docker · Redis · MySQL · React · Next.js
+
+**其他方向**：
 - 多语言 AST 支持（JavaScript/TypeScript/Java/Go）
 - bench_tasks 补齐（bugfix 类、跨文件类）
-- 文档翻译（英文 README）
+- 新的确定性脚本（`scripts/` 目录下，不进 LLM context）
+- 飞轮优化规则的质量验证
+
+### 不建议改的
+
+- 5 个元专家的接口和流水线顺序（架构已定稿）
+- Gate 的 JSON 输出格式
+- SKILL.md 的 frontmatter 字段定义
 
 ---
 
