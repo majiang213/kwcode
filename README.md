@@ -20,9 +20,8 @@
 
 | 日期 | 内容 |
 |------|------|
-| 04-30 | **Gate/路由/走查**：qwen3:8b真实模型20题验证；修复Planner regex+4个空架子接入；PPT分类修复；SSH ops指引；搜索LLM自动site:限定；P1(hard自动拆分+预搜索)+P2(PCED-Lite多源聚合)；代码审查修复8项(死代码/竞态/假数据)；三层上下文架构+代码块保护+SSH持久会话 |
-| 04-29 | **架构定稿**：5元专家(Locator/Generator/Verifier/Debugger/Reviewer)+15个SKILL.md渐进加载；DAG TaskCompiler+/multi命令；动态重试预算；Token预算+Guardrails+可观测性+会话连续性；移除Python专家系统(方向错误) |
-| 04-29 | **MVP→v0.7.0**：Gate→专家流水线→Verifier；BM25+AST调用图定位；三阶段重试+Reflection；搜索增强；模型自适应 |
+| 04-30 | 三层上下文架构 + SSH持久会话 + Gate/路由优化 + PCED-Lite多源聚合 + 搜索site:自动限定 + qwen3:8b 20题真实验证 + 13项bug修复 |
+| 04-29 | 5元专家体系定稿 + 15个SKILL.md渐进加载 + DAG多任务编排 + Debug Subagent + Token预算/Guardrails/可观测性 |
 
 详细变更见 [CHANGELOG.md](CHANGELOG.md)
 
