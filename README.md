@@ -211,6 +211,14 @@ Prompt Optimizer（可选，需 Anthropic API key）：
 ### Office 文档
 - Excel / PPT / Word 生成
 
+### 多模态图片处理
+- `/paste` 命令：从剪贴板粘贴图片
+- `/image <path>` 命令：添加图片文件
+- 图片分析：代码截图、UI设计图、文档表格
+- 基于图片的代码生成：UI截图→HTML/CSS、错误截图→修复代码
+- 支持格式：PNG、JPG、JPEG、GIF、WebP、BMP
+- 安装：`pip install kwcode[multimodal]`
+
 ### 价值可见
 - `kwcode stats`：完成任务数、节省时间估算
 - 飞轮通知：专家投产时弹出
@@ -355,6 +363,8 @@ kwcode --plan "重构数据库连接层"
 /memory              查看项目记忆
 /init                初始化项目规则文件
 /cd <路径>           切换项目目录
+/paste               从剪贴板粘贴图片
+/image <路径>        添加图片文件
 /help                显示帮助
 ```
 
@@ -418,7 +428,8 @@ kaiwu/
 │   ├── verifier.py          # [元专家] 语法检查 + pytest
 │   ├── debug_subagent.py    # [元专家] 运行时调试（sys.settrace）
 │   ├── reviewer.py          # [元专家] 需求对齐审查
-│   └── search_augmentor.py  # 搜索增强 + BM25 + CE 重排
+│   ├── search_augmentor.py  # 搜索增强 + BM25 + CE 重排
+│   └── vision_expert.py     # [元专家] 多模态图片处理
 ├── search/
 │   ├── reranker.py          # Cross-Encoder 可选重排
 │   ├── duckduckgo.py        # SearXNG + DDG 并行搜索

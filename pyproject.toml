@@ -30,6 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 rerank = ["sentence-transformers>=2.7.0"]
+multimodal = ["Pillow>=10.0", "pyperclip>=1.8"]
 
 [project.scripts]
 kwcode = "kaiwu.cli.main:app"
