@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)]()
-[![Tests](https://img.shields.io/badge/Tests-311%2F311-brightgreen.svg)]()
+[![Multi-Platform Tests](https://github.com/val1813/kwcode/actions/workflows/test.yml/badge.svg)](https://github.com/val1813/kwcode/actions/workflows/test.yml)
 [![Version](https://img.shields.io/badge/Version-1.0.9-blue.svg)]()
 
 </div>
@@ -277,7 +277,33 @@ Prompt Optimizer（可选，需 Anthropic API key）：
 | 16GB | qwen3:14b |
 | 24GB+ | qwen3:30b-a3b |
 
+**macOS 用户注意**：Apple Silicon (M1/M2/M3/M4) 使用统一内存架构，无需单独显卡显存。推荐使用 [Ollama](https://ollama.com) 本地运行模型，原生支持 Apple Silicon。
+
 ### 安装
+
+#### macOS 安装
+
+```bash
+# 1. 安装 Python（如果尚未安装）
+brew install python@3.12
+
+# 2. 安装 KWCode
+pip3 install kwcode
+
+# 国内加速：
+pip3 install kwcode -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 3. （推荐）安装 Ollama 用于本地模型
+brew install ollama
+ollama pull qwen3:8b
+
+# 4. 启动
+kwcode
+```
+
+**Apple Silicon 兼容性**：KWCode 完全支持 Apple Silicon (M1/M2/M3/M4) Mac。GPU 信息显示为 "Apple Silicon GPU"，系统会自动检测统一内存。
+
+#### Windows / Linux 安装
 
 ```bash
 # 安装 KWCode
