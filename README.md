@@ -10,13 +10,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)]()
 [![Tests](https://img.shields.io/badge/Tests-311%2F311-brightgreen.svg)]()
-[![Version](https://img.shields.io/badge/Version-1.0.7-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.0.9-blue.svg)]()
 
 </div>
 
 ---
 
-> **v1.0.7 已发布，可测试使用！** 感谢各位试用提报优化建议。安装命令：
+> **v1.0.9 已发布，可测试使用！** 感谢各位试用提报优化建议。安装命令：
 >
 > ```bash
 > pip install kwcode
