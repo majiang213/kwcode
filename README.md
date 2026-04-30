@@ -18,18 +18,11 @@
 
 ## 更新日志
 
-| 日期 | 版本 | 更新内容 |
-|------|------|---------|
-| 04-30 | v1.0.7 | **系统走查修复5项**：Planner regex bug；TrajectoryCollector.get_by_expert缺失；auto_decompose/预搜索/session_md接入调用链。qwen3:8b真实验证Gate分类5/5正确 |
-| 04-30 | v1.0.6 | **搜索优化**：LLM自动决定site:限定(arxiv/github/stackoverflow等)；query安全过滤(防prompt injection)；零新API零新依赖 |
-| 04-30 | v1.0.5 | **P1+P2实现**：Gate新增needs_search/subtask_hint字段；hard任务自动拆分(Planner.auto_decompose)；预搜索前移；PCED-Lite多源聚合(arXiv:2601.08670) |
-| 04-30 | v1.0.4 | **代码审查修复8项**：DebugSubagent实例化接入；PromptOptimizer接入投产流程；Checkpoint并行竞态修复；conversation_history存真实LLM输出 |
-| 04-30 | v1.0.3 | **三层上下文架构**：Active(摘要≤2K)+Structured State(Python对象精确传递)+Archive(文件BM25检索)；代码块压缩保护(CTX-RED-1)；paramiko持久SSH会话 |
-| 04-29 | v1.0.2 | **MoE框架补全**：Token预算管控(超限自动终止)；Guardrails护栏(危险命令拦截+敏感文件备份)；执行可观测性(结构化trace)；会话连续性(SESSION.md) |
-| 04-29 | v1.0.1 | **Gate/Loop优化**：动态重试预算(easy=2/hard=4)；TaskPlanner自动任务分解(1次LLM调用出DAG)；Context污染修复(重试清空debug_info) |
-| 04-29 | v1.0.0 | **架构定稿**：5元专家体系(Locator→Generator→Verifier→Debugger→Reviewer)；15个SKILL.md领域知识渐进式加载；移除Python专家系统 |
-| 04-29 | v0.9.0 | DAG TaskCompiler + /multi命令；Debug Subagent(sys.settrace运行时调试)；Prompt Optimizer(飞轮优化YAML) |
-| 04-29 | v0.7.0 | MVP完成：Gate→专家流水线→Verifier；BM25+AST调用图定位；三阶段重试+Reflection；搜索增强；模型自适应 |
+| 日期 | 内容 |
+|------|------|
+| 04-30 | **Gate/路由/走查**：qwen3:8b真实模型20题验证；修复Planner regex+4个空架子接入；PPT分类修复；SSH ops指引；搜索LLM自动site:限定；P1(hard自动拆分+预搜索)+P2(PCED-Lite多源聚合)；代码审查修复8项(死代码/竞态/假数据)；三层上下文架构+代码块保护+SSH持久会话 |
+| 04-29 | **架构定稿**：5元专家(Locator/Generator/Verifier/Debugger/Reviewer)+15个SKILL.md渐进加载；DAG TaskCompiler+/multi命令；动态重试预算；Token预算+Guardrails+可观测性+会话连续性；移除Python专家系统(方向错误) |
+| 04-29 | **MVP→v0.7.0**：Gate→专家流水线→Verifier；BM25+AST调用图定位；三阶段重试+Reflection；搜索增强；模型自适应 |
 
 详细变更见 [CHANGELOG.md](CHANGELOG.md)
 
