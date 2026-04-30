@@ -92,6 +92,7 @@ class Gate:
         ("generator",): "codegen",
         ("office",): "office",
         ("chat",): "chat",
+        ("vision",): "vision",
     }
 
     def __init__(self, llm: LLMBackend, use_grammar: bool = False, registry: "ExpertRegistry | None" = None):
@@ -160,6 +161,15 @@ class Gate:
         """最后一道防线：仅纠正office误分类。不替代模型分类能力。"""
         et = result.get("expert_type", "chat")
         lower = user_input.lower()
+
+        # CLI image commands append explicit markers before classification.
+        # Treat those as authoritative so image tasks do not fall through to chat/codegen
+        # when the model ignores a path-only hint.
+        if "[图片:" in user_input or "[image:" in lower:
+            result["expert_type"] = "vision"
+            result.setdefault("needs_search", False)
+            result.setdefault("subtask_hint", "")
+            return result
 
         # office仅限Excel/Word/PPT办公文档，代码任务不应走office
         if et == "office":

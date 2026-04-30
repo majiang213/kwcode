@@ -110,7 +110,7 @@ class PipelineOrchestrator:
 
         # 处理图片路径
         if image_paths:
-            ctx.image_paths = image_paths
+            ctx.image_paths = list(image_paths)
             logger.info(f"[orchestrator] 任务包含 {len(image_paths)} 张图片")
 
         expert_type = gate_result.get("expert_type", "locator_repair")
@@ -153,14 +153,33 @@ class PipelineOrchestrator:
         if expert_type == "vision":
             self._emit(on_status, "vision", "图片处理模式")
             if self.vision_expert and ctx.image_paths:
-                # 使用第一个图片进行处理
-                ctx.image_path = ctx.image_paths[0]
-                result = self.vision_expert.run(ctx)
+                outputs = []
+                failures = []
+                metadata = []
+                for idx, image_path in enumerate(ctx.image_paths, 1):
+                    ctx.image_path = image_path
+                    result = self.vision_expert.run(ctx)
+                    output = result.get("output", "")
+                    if len(ctx.image_paths) > 1:
+                        outputs.append(f"图片 {idx} ({image_path}):\n{output}")
+                    else:
+                        outputs.append(output)
+                    metadata.append(result.get("metadata", {}))
+                    if not result.get("success", False):
+                        failures.append(output or result.get("error") or f"图片处理失败: {image_path}")
+
+                explanation = "\n\n".join(outputs).strip()
+                ctx.generator_output = {
+                    "explanation": explanation,
+                    "patches": [],
+                    "metadata": {"vision": metadata},
+                }
                 elapsed = time.time() - start_time
+                success = not failures
                 return {
-                    "success": result.get("success", False),
+                    "success": success,
                     "context": ctx,
-                    "error": result.get("error"),
+                    "error": "\n".join(failures) if failures else None,
                     "elapsed": elapsed,
                 }
             else:
