@@ -65,8 +65,9 @@ class TaskContext:
     # 当前子任务ID
     current_task_id: str = ""
 
-    # 上游依赖结果摘要（Active Context，≤2K tokens，供Gate/Generator看）
-    upstream_summary: str = ""
+    # 上游依赖结果（结构化，供Gate/Locator/Generator消费）
+    upstream_summary: dict = field(default_factory=dict)
+    # shape: {"modified_files": [...], "diffs": {...}, "new_symbols": [...], "broken_interfaces": [...]}
 
     # Experience Replay: similar successful trajectories from history
     similar_trajectories: list = field(default_factory=list)

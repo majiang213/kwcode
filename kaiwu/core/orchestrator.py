@@ -17,6 +17,7 @@ from kaiwu.experts.locator import LocatorExpert
 from kaiwu.experts.generator import GeneratorExpert
 from kaiwu.experts.verifier import VerifierExpert
 from kaiwu.experts.search_augmentor import SearchAugmentorExpert
+from kaiwu.experts.search_subagent import SearchSubagent
 from kaiwu.experts.office_handler import OfficeHandlerExpert
 from kaiwu.experts.chat_expert import ChatExpert
 from kaiwu.memory.kaiwu_md import KaiwuMemory
@@ -27,6 +28,7 @@ from kaiwu.flywheel.pattern_detector import PatternDetector
 from kaiwu.flywheel.ab_tester import ABTester
 from kaiwu.core.checkpoint import Checkpoint
 from kaiwu.core.kwcode_md import load_kwcode_md, build_kwcode_system
+from kaiwu.core.upstream_manifest import UpstreamManifest
 from kaiwu.stats.value_tracker import ValueTracker
 from kaiwu.notification.flywheel_notifier import FlywheelNotifier
 
@@ -122,6 +124,10 @@ class PipelineOrchestrator:
         self.bus = bus or EventBus()
         self._wink = WinkMonitor()
         self._cognitive_gate = CognitiveGate()
+        # SearchSubagent: isolated context window for code search
+        self._search_subagent = SearchSubagent(locator, tool_executor)
+        # UpstreamManifest: cross-file contract tracking (per-task lifecycle)
+        self._manifest = UpstreamManifest()
 
     def run(
         self,
@@ -431,6 +437,9 @@ class PipelineOrchestrator:
             wink_hint = self._wink.check(ctx, self.bus)
 
             # ── 错误策略路由：按 error_type 切换重试序列 ──
+            # contract_violation uses same strategy as runtime (re-locate + re-generate)
+            if current_error_type == "contract_violation":
+                current_error_type = "patch_apply"  # Re-locate to get fresh context
             retry_strategy = RETRY_STRATEGIES.get(current_error_type, RETRY_STRATEGIES["unknown"])
             sequence = retry_strategy["sequence"]
             ctx.retry_hint = self._build_retry_hint(ctx, current_error_type)
@@ -532,13 +541,25 @@ class PipelineOrchestrator:
         """Execute a fixed expert sequence. Returns True if all steps pass."""
         for step in sequence:
             if step == "locator":
-                self._emit(on_status, "locator", "定位中...")
-                result = self.locator.run(ctx)
-                if not result:
+                self._emit(on_status, "locator", "定位中（隔离搜索）...")
+                # Use SearchSubagent: isolated context, parallel reads
+                search_result = self._search_subagent.search(ctx, self._manifest)
+                if not search_result or not search_result.get("relevant_files"):
                     self._emit(on_status, "locator_fail", "定位失败")
                     return False
-                files = result.get("relevant_files", [])
-                funcs = result.get("relevant_functions", [])
+                # Transfer clean results to ctx (Generator only sees these)
+                ctx.locator_output = {
+                    "relevant_files": search_result["relevant_files"],
+                    "relevant_functions": search_result["relevant_functions"],
+                    "edit_locations": search_result["edit_locations"],
+                    "method": search_result["method"],
+                }
+                ctx.relevant_code_snippets = search_result["code_snippets"]
+                # Inject upstream constraints for Generator
+                if search_result.get("upstream_constraints"):
+                    ctx._upstream_constraints = search_result["upstream_constraints"]
+                files = search_result["relevant_files"]
+                funcs = search_result["relevant_functions"]
                 self._emit(on_status, "locator_done", f"文件：{', '.join(files[:3])} | 函数：{', '.join(funcs[:3])}")
 
             elif step == "generator":
@@ -549,9 +570,29 @@ class PipelineOrchestrator:
                     return False
                 n_patches = len(result.get("patches", []))
                 self._emit(on_status, "generator_done", f"生成{n_patches}个patch")
+                # Update manifest with new patches (for cross-file tracking)
+                self._manifest.update(result.get("patches", []))
 
             elif step == "verifier":
                 self._emit(on_status, "verifier", "验证中...")
+                # Cross-file consistency check before running tests
+                contract_violations = self._check_contracts(ctx)
+                if contract_violations:
+                    detail = "; ".join(contract_violations[:3])
+                    self._emit(on_status, "contract_violation", f"跨文件契约冲突：{detail[:100]}")
+                    ctx.verifier_output = {
+                        "passed": False,
+                        "syntax_ok": True,
+                        "tests_passed": 0,
+                        "tests_total": 0,
+                        "error_detail": f"Contract violations: {detail}",
+                        "error_type": "contract_violation",
+                        "error_file": "",
+                        "error_line": 0,
+                        "error_message": detail[:200],
+                        "failed_tests": [],
+                    }
+                    return False
                 result = self.verifier.run(ctx)
                 if not result or not result.get("passed"):
                     detail = result.get("error_detail", "unknown") if result else "no result"
@@ -570,6 +611,20 @@ class PipelineOrchestrator:
                 self._emit(on_status, "office_done", result.get("output", "完成"))
 
         return True
+
+    def _check_contracts(self, ctx: TaskContext) -> list[str]:
+        """Check cross-file contract consistency using UpstreamManifest. Zero LLM."""
+        if not ctx.generator_output:
+            return []
+        patches = ctx.generator_output.get("patches", [])
+        violations = []
+        for patch in patches:
+            file_path = patch.get("file", "")
+            modified = patch.get("modified", "")
+            if file_path and modified:
+                v = self._manifest.check_consistency(file_path, modified)
+                violations.extend(v)
+        return violations
 
     def _record_trajectory(self, ctx: TaskContext, success: bool, elapsed: float, on_status):
         """Record trajectory and run pattern detection (non-blocking, never raises)."""
