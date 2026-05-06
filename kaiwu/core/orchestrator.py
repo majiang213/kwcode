@@ -7,7 +7,11 @@ RED-5: Max 3 retries, hardcoded.
 import logging
 import time
 import threading
-from typing import Optional
+from typing import Callable, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from kaiwu.experts.debug_subagent import DebugSubagent
+    from kaiwu.experts.vision_expert import VisionExpert
 
 from kaiwu.core.context import TaskContext
 from kaiwu.core.event_bus import EventBus
@@ -24,6 +28,8 @@ from kaiwu.memory.kaiwu_md import KaiwuMemory
 from kaiwu.registry.expert_registry import ExpertRegistry
 from kaiwu.tools.executor import ToolExecutor
 from kaiwu.flywheel.trajectory_collector import TrajectoryCollector
+
+__all__ = ["PipelineOrchestrator"]
 from kaiwu.flywheel.pattern_detector import PatternDetector
 from kaiwu.flywheel.ab_tester import ABTester
 from kaiwu.core.checkpoint import Checkpoint
@@ -97,13 +103,13 @@ class PipelineOrchestrator:
         office_handler: OfficeHandlerExpert,
         tool_executor: ToolExecutor,
         memory: KaiwuMemory,
-        registry: ExpertRegistry | None = None,
-        trajectory_collector: TrajectoryCollector | None = None,
-        ab_tester: ABTester | None = None,
-        chat_expert: ChatExpert | None = None,
-        debug_subagent=None,
-        vision_expert=None,
-        bus: EventBus | None = None,
+        registry: Optional[ExpertRegistry] = None,
+        trajectory_collector: Optional[TrajectoryCollector] = None,
+        ab_tester: Optional[ABTester] = None,
+        chat_expert: Optional[ChatExpert] = None,
+        debug_subagent: Optional["DebugSubagent"] = None,
+        vision_expert: Optional["VisionExpert"] = None,
+        bus: Optional[EventBus] = None,
     ):
         self.locator = locator
         self.generator = generator
@@ -124,9 +130,7 @@ class PipelineOrchestrator:
         self.bus = bus or EventBus()
         self._wink = WinkMonitor()
         self._cognitive_gate = CognitiveGate()
-        # SearchSubagent: isolated context window for code search
         self._search_subagent = SearchSubagent(locator, tool_executor)
-        # UpstreamManifest: cross-file contract tracking (per-task lifecycle)
         self._manifest = UpstreamManifest()
 
     def run(
@@ -134,11 +138,11 @@ class PipelineOrchestrator:
         user_input: str,
         gate_result: dict,
         project_root: str,
-        on_status=None,
+        on_status: "Optional[Callable[[str, str], None]]" = None,
         no_search: bool = False,
         skip_checkpoint: bool = False,
         pre_search_results: str = "",
-        image_paths: list = None,
+        image_paths: Optional[list[str]] = None,
     ) -> dict:
         """
         Execute the expert pipeline.
@@ -169,6 +173,9 @@ class PipelineOrchestrator:
             expert_system_prompt=gate_result.get("system_prompt", ""),
         )
 
+        # Reset manifest for each new top-level task
+        self._manifest.clear()
+
         # 处理图片路径
         if image_paths:
             ctx.image_paths = list(image_paths)
@@ -194,78 +201,13 @@ class PipelineOrchestrator:
                 else:
                     ctx.expert_system_prompt = kwcode_rules
 
-        # chat类型：直接回复，不走AB测试/搜索/重试
-        if expert_type == "chat":
-            self._emit(on_status, "chat", "聊天模式")
-            if self.chat_expert:
-                result = self.chat_expert.run(ctx)
-            else:
-                ctx.generator_output = {"explanation": "我是KWCode，专注于代码任务。", "patches": []}
-                result = {"passed": True}
-            elapsed = time.time() - start_time
-            return {
-                "success": True,
-                "context": ctx,
-                "error": None,
-                "elapsed": elapsed,
-            }
+        # chat/vision类型：早期返回
+        simple_result = self._handle_simple_type(ctx, expert_type, start_time, on_status)
+        if simple_result is not None:
+            return simple_result
 
-        # vision类型：图片处理任务
-        if expert_type == "vision":
-            self._emit(on_status, "vision", "图片处理模式")
-            if self.vision_expert and ctx.image_paths:
-                result = self.vision_expert.run(ctx)
-                explanation = result.get("output", "").strip()
-                ctx.generator_output = {
-                    "explanation": explanation,
-                    "patches": [],
-                    "metadata": {"vision": result.get("metadata", {})},
-                }
-                elapsed = time.time() - start_time
-                success = result.get("success", False)
-                return {
-                    "success": success,
-                    "context": ctx,
-                    "error": None if success else explanation or "图片处理失败",
-                    "elapsed": elapsed,
-                }
-            else:
-                ctx.generator_output = {"explanation": "图片处理功能需要配置Vision专家", "patches": []}
-                elapsed = time.time() - start_time
-                return {
-                    "success": False,
-                    "context": ctx,
-                    "error": "Vision专家未配置或未提供图片",
-                    "elapsed": elapsed,
-                }
-
-        # Gate 3: AB test — check if a candidate expert should be used for this task
-        ab_candidate_name = None
-        ab_used_new = False
-        if self.ab_tester and expert_type != "chat":
-            candidate_def = self.ab_tester.should_use_candidate(expert_type)
-            if candidate_def:
-                ab_candidate_name = candidate_def["name"]
-                ab_used_new = True
-                # Override gate_result to use the candidate expert's pipeline
-                gate_result = {
-                    **gate_result,
-                    "expert_name": ab_candidate_name,
-                    "route_type": "expert_registry",
-                    "pipeline": candidate_def.get("pipeline", []),
-                    "system_prompt": candidate_def.get("system_prompt", ""),
-                }
-                self._emit(on_status, "ab_test", f"AB测试：使用候选专家 {ab_candidate_name}")
-            else:
-                # Check if any candidate is in AB testing for this type (baseline run)
-                for name, info in self.ab_tester._candidates.items():
-                    if (info["status"] == "ab_testing"
-                            and info["expert_def"].get("type") == expert_type
-                            and len(info["ab_results"]) < 10):
-                        ab_candidate_name = name
-                        ab_used_new = False
-                        self._emit(on_status, "ab_test", f"AB测试：基线对照（候选 {name}）")
-                        break
+        # Gate 3: AB test
+        ab_candidate_name, ab_used_new, gate_result = self._setup_ab_test(gate_result, expert_type, on_status)
 
         # Use custom pipeline from expert registry if available, else default
         if gate_result.get("route_type") == "expert_registry" and "pipeline" in gate_result:
@@ -275,49 +217,8 @@ class PipelineOrchestrator:
 
         self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')}")
 
-        # ── Experience Replay: find similar successful trajectories ──
-        if self.trajectory_collector and expert_type not in ("chat", "office", "vision"):
-            try:
-                similar = self.trajectory_collector.find_similar(user_input, expert_type, k=3)
-                if similar:
-                    ctx.similar_trajectories = similar
-                    best = similar[0]
-                    self._emit(on_status, "replay",
-                               f"发现相似成功案例：{best.get('user_input', '')[:40]}")
-            except Exception as e:
-                logger.debug("Experience replay failed (non-blocking): %s", e)
-
-        # codegen任务如果涉及实时数据，首次就触发搜索（不等失败重试）
-        if expert_type == "codegen" and not no_search and self._needs_realtime_data(user_input):
-            try:
-                self._emit(on_status, "search", "检测到实时数据需求，预搜索...")
-                results = self.search_augmentor.search(ctx)
-                if results:
-                    ctx.search_results = results
-                    ctx.search_triggered = True
-                    self._emit(on_status, "search_done", f"搜索完成，注入{len(results)}字参考信息")
-            except Exception as e:
-                logger.debug("Pre-search failed (网络保护，不阻塞): %s", e)
-
-        # ── Plan 自动触发：hard 任务自动生成计划（不打断用户）──
-        if (gate_result.get("difficulty") == "hard"
-                and expert_type not in ("chat", "office", "vision")
-                and not ctx.subtask_results):
-            try:
-                from kaiwu.core.planner import Planner
-                from kaiwu.memory import pattern_md
-                planner = Planner(
-                    locator=self.locator,
-                    pattern_md_module=pattern_md,
-                    llm=self.generator.llm,
-                )
-                plan = planner.generate_plan_steps(user_input, gate_result, project_root)
-                if plan and len(plan) > 1:
-                    ctx.execution_plan = plan
-                    self._emit(on_status, "plan_generated", f"自动生成 {len(plan)} 步计划")
-                    self.bus.emit("plan_generated", {"steps": len(plan), "msg": f"生成 {len(plan)} 步计划"})
-            except Exception as e:
-                logger.debug("Auto-plan failed (non-blocking): %s", e)
+        # Experience replay + pre-search + plan
+        self._prepare_context(ctx, gate_result, expert_type, user_input, project_root, no_search, on_status)
 
         # ── Checkpoint: snapshot before execution (skip in multi-task to avoid race) ──
         checkpoint = Checkpoint(project_root)
@@ -354,33 +255,9 @@ class PipelineOrchestrator:
 
             if success:
                 elapsed = time.time() - start_time
-                checkpoint.discard()  # Clean up snapshot on success
-
-                # Reviewer: 需求对齐审查（非阻塞，不影响成功判定）
-                review_result = self._do_review(ctx, on_status)
-
-                # Save to memory on success (with elapsed for expert/pattern tracking)
-                self.memory.save(project_root, ctx, elapsed=elapsed)
-                # Update expert registry stats
-                expert_name = gate_result.get("expert_name")
-                if expert_name and self.registry:
-                    self.registry.update_stats(expert_name, success=True, latency=elapsed)
-                # Flywheel: record trajectory and detect patterns (non-blocking)
-                self._record_trajectory(ctx, True, elapsed, on_status)
-                # Gate 3: record AB test result if this task is part of an AB test
-                self._record_ab_result(ab_candidate_name, ab_used_new, True, elapsed, on_status)
-                # P2: Value tracking (local SQLite)
-                self._record_value(project_root, gate_result, True, elapsed, ctx)
-                # P2: Milestone check
-                self._check_milestone(on_status)
-                # Reflexion持久化：成功时也记录注意事项
-                self._persist_reflection(project_root, ctx, gate_result, success=True)
-                return {
-                    "success": True,
-                    "context": ctx,
-                    "error": None,
-                    "elapsed": elapsed,
-                }
+                return self._record_success(ctx, project_root, gate_result,
+                                            ab_candidate_name, ab_used_new, elapsed,
+                                            checkpoint, on_status)
 
             ctx.retry_count += 1
             error_detail = ""
@@ -506,6 +383,173 @@ class PipelineOrchestrator:
         _watchdog.cancel()  # Clean up watchdog timer
         elapsed = time.time() - start_time
 
+        return self._record_failure_result(ctx, project_root, gate_result,
+                                           ab_candidate_name, ab_used_new, max_retries,
+                                           elapsed, checkpoint, checkpoint_saved, on_status)
+
+    def _handle_simple_type(self, ctx: TaskContext, expert_type: str, start_time: float, on_status) -> Optional[dict]:
+        """Handle chat and vision early returns. Returns result dict or None to continue."""
+        # chat类型：直接回复，不走AB测试/搜索/重试
+        if expert_type == "chat":
+            self._emit(on_status, "chat", "聊天模式")
+            if self.chat_expert:
+                result = self.chat_expert.run(ctx)
+            else:
+                ctx.generator_output = {"explanation": "我是KWCode，专注于代码任务。", "patches": []}
+                result = {"passed": True}
+            elapsed = time.time() - start_time
+            return {
+                "success": True,
+                "context": ctx,
+                "error": None,
+                "elapsed": elapsed,
+            }
+
+        # vision类型：图片处理任务
+        if expert_type == "vision":
+            self._emit(on_status, "vision", "图片处理模式")
+            if self.vision_expert and ctx.image_paths:
+                result = self.vision_expert.run(ctx)
+                explanation = result.get("output", "").strip()
+                ctx.generator_output = {
+                    "explanation": explanation,
+                    "patches": [],
+                    "metadata": {"vision": result.get("metadata", {})},
+                }
+                elapsed = time.time() - start_time
+                success = result.get("success", False)
+                return {
+                    "success": success,
+                    "context": ctx,
+                    "error": None if success else explanation or "图片处理失败",
+                    "elapsed": elapsed,
+                }
+            else:
+                ctx.generator_output = {"explanation": "图片处理功能需要配置Vision专家", "patches": []}
+                elapsed = time.time() - start_time
+                return {
+                    "success": False,
+                    "context": ctx,
+                    "error": "Vision专家未配置或未提供图片",
+                    "elapsed": elapsed,
+                }
+
+        return None
+
+    def _setup_ab_test(self, gate_result: dict, expert_type: str, on_status) -> tuple:
+        """Setup AB test. Returns (ab_candidate_name, ab_used_new, gate_result)."""
+        ab_candidate_name = None
+        ab_used_new = False
+        if self.ab_tester and expert_type != "chat":
+            candidate_def = self.ab_tester.should_use_candidate(expert_type)
+            if candidate_def:
+                ab_candidate_name = candidate_def["name"]
+                ab_used_new = True
+                # Override gate_result to use the candidate expert's pipeline
+                gate_result = {
+                    **gate_result,
+                    "expert_name": ab_candidate_name,
+                    "route_type": "expert_registry",
+                    "pipeline": candidate_def.get("pipeline", []),
+                    "system_prompt": candidate_def.get("system_prompt", ""),
+                }
+                self._emit(on_status, "ab_test", f"AB测试：使用候选专家 {ab_candidate_name}")
+            else:
+                # Check if any candidate is in AB testing for this type (baseline run)
+                for name, info in self.ab_tester._candidates.items():
+                    if (info["status"] == "ab_testing"
+                            and info["expert_def"].get("type") == expert_type
+                            and len(info["ab_results"]) < 10):
+                        ab_candidate_name = name
+                        ab_used_new = False
+                        self._emit(on_status, "ab_test", f"AB测试：基线对照（候选 {name}）")
+                        break
+        return (ab_candidate_name, ab_used_new, gate_result)
+
+    def _prepare_context(self, ctx: TaskContext, gate_result: dict, expert_type: str,
+                         user_input: str, project_root: str, no_search: bool, on_status) -> None:
+        """Experience replay + pre-search + plan generation."""
+        # ── Experience Replay: find similar successful trajectories ──
+        if self.trajectory_collector and expert_type not in ("chat", "office", "vision"):
+            try:
+                similar = self.trajectory_collector.find_similar(user_input, expert_type, k=3)
+                if similar:
+                    ctx.similar_trajectories = similar
+                    best = similar[0]
+                    self._emit(on_status, "replay",
+                               f"发现相似成功案例：{best.get('user_input', '')[:40]}")
+            except Exception as e:
+                logger.debug("Experience replay failed (non-blocking): %s", e)
+
+        # codegen任务如果涉及实时数据，首次就触发搜索（不等失败重试）
+        if expert_type == "codegen" and not no_search and self._needs_realtime_data(user_input):
+            try:
+                self._emit(on_status, "search", "检测到实时数据需求，预搜索...")
+                results = self.search_augmentor.search(ctx)
+                if results:
+                    ctx.search_results = results
+                    ctx.search_triggered = True
+                    self._emit(on_status, "search_done", f"搜索完成，注入{len(results)}字参考信息")
+            except Exception as e:
+                logger.debug("Pre-search failed (网络保护，不阻塞): %s", e)
+
+        # ── Plan 自动触发：hard 任务自动生成计划（不打断用户）──
+        if (gate_result.get("difficulty") == "hard"
+                and expert_type not in ("chat", "office", "vision")
+                and not ctx.subtask_results):
+            try:
+                from kaiwu.core.planner import Planner
+                from kaiwu.memory import pattern_md
+                planner = Planner(
+                    locator=self.locator,
+                    pattern_md_module=pattern_md,
+                    llm=self.generator.llm,
+                )
+                plan = planner.generate_plan_steps(user_input, gate_result, project_root)
+                if plan and len(plan) > 1:
+                    ctx.execution_plan = plan
+                    self._emit(on_status, "plan_generated", f"自动生成 {len(plan)} 步计划")
+                    self.bus.emit("plan_generated", {"steps": len(plan), "msg": f"生成 {len(plan)} 步计划"})
+            except Exception as e:
+                logger.debug("Auto-plan failed (non-blocking): %s", e)
+
+    def _record_success(self, ctx: TaskContext, project_root: str, gate_result: dict,
+                        ab_candidate_name, ab_used_new: bool, elapsed: float,
+                        checkpoint, on_status) -> dict:
+        """Record success: memory, registry, trajectory, AB, value, milestone, reflection."""
+        checkpoint.discard()  # Clean up snapshot on success
+
+        # Reviewer: 需求对齐审查（非阻塞，不影响成功判定）
+        review_result = self._do_review(ctx, on_status)
+
+        # Save to memory on success (with elapsed for expert/pattern tracking)
+        self.memory.save(project_root, ctx, elapsed=elapsed)
+        # Update expert registry stats
+        expert_name = gate_result.get("expert_name")
+        if expert_name and self.registry:
+            self.registry.update_stats(expert_name, success=True, latency=elapsed)
+        # Flywheel: record trajectory and detect patterns (non-blocking)
+        self._record_trajectory(ctx, True, elapsed, on_status)
+        # Gate 3: record AB test result if this task is part of an AB test
+        self._record_ab_result(ab_candidate_name, ab_used_new, True, elapsed, on_status)
+        # P2: Value tracking (local SQLite)
+        self._record_value(project_root, gate_result, True, elapsed, ctx)
+        # P2: Milestone check
+        self._check_milestone(on_status)
+        # Reflexion持久化：成功时也记录注意事项
+        self._persist_reflection(project_root, ctx, gate_result, success=True)
+        return {
+            "success": True,
+            "context": ctx,
+            "error": None,
+            "elapsed": elapsed,
+        }
+
+    def _record_failure_result(self, ctx: TaskContext, project_root: str, gate_result: dict,
+                               ab_candidate_name, ab_used_new: bool, max_retries: int,
+                               elapsed: float, checkpoint, checkpoint_saved: bool,
+                               on_status) -> dict:
+        """Record failure: checkpoint restore, memory, registry, trajectory, AB, value, reflection."""
         # ── Checkpoint: restore on failure ──
         if checkpoint_saved:
             restored = checkpoint.restore()
@@ -557,10 +601,11 @@ class PipelineOrchestrator:
                 ctx.relevant_code_snippets = search_result["code_snippets"]
                 # Inject upstream constraints for Generator
                 if search_result.get("upstream_constraints"):
-                    ctx._upstream_constraints = search_result["upstream_constraints"]
+                    ctx.upstream_constraints = search_result["upstream_constraints"]
                 files = search_result["relevant_files"]
                 funcs = search_result["relevant_functions"]
-                self._emit(on_status, "locator_done", f"文件：{', '.join(files[:3])} | 函数：{', '.join(funcs[:3])}")
+                func_str = ', '.join(funcs[:3]) if funcs else "（文件级修改）"
+                self._emit(on_status, "locator_done", f"文件：{', '.join(files[:3])} | 函数：{func_str}")
 
             elif step == "generator":
                 self._emit(on_status, "generator", "生成patch...")

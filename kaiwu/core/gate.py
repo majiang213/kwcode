@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["Gate"]
+
 GATE_SYSTEM = "你是任务分类器。只返回JSON，不要有其他内容。"
 
 GATE_PROMPT = """分析用户输入，返回分类JSON。

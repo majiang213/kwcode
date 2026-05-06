@@ -6,6 +6,8 @@ Each expert reads from and writes to specific fields only.
 from dataclasses import dataclass, field
 from typing import Optional
 
+__all__ = ["TaskContext"]
+
 
 @dataclass
 class TaskContext:
@@ -71,3 +73,9 @@ class TaskContext:
 
     # Experience Replay: similar successful trajectories from history
     similar_trajectories: list = field(default_factory=list)
+
+    # SearchSubagent: cross-file constraints injected into Generator prompt
+    upstream_constraints: str = ""
+
+    # Retry hint: error-specific guidance injected into Generator prompt
+    retry_hint: str = ""

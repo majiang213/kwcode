@@ -34,13 +34,13 @@ def create_app(
 
     from kaiwu.server.models import (
         TaskRequest, TaskResponse, HealthResponse,
-        StatusResponse, FileContent,
+        StatusResponse, FileContent, ManifestResponse,
     )
     from kaiwu.server.pipeline_factory import build_pipeline
 
     app = FastAPI(
         title="KwCode Server",
-        version="1.3.0",
+        version="1.5.0",
         description="KwCode coding agent HTTP API with SSE streaming",
     )
 
@@ -78,7 +78,7 @@ def create_app(
     async def health():
         return HealthResponse(
             status="ok",
-            version="1.3.0",
+            version="1.5.0",
             model=ollama_model or "local",
             project_root=project_root,
         )
@@ -285,5 +285,17 @@ def create_app(
             return {"status": "ok", "files": len(rig.get("files", {}))}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/manifest", response_model=ManifestResponse)
+    async def get_manifest():
+        """Get current UpstreamManifest state (cross-file contracts)."""
+        manifest = orchestrator._manifest
+        sigs = manifest.get_all_signatures()
+        consts = manifest.get_all_constants()
+        return ManifestResponse(
+            signatures=sigs,
+            constants=consts,
+            file_count=len(sigs),
+        )
 
     return app

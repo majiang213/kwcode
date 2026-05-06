@@ -26,6 +26,8 @@ from kaiwu.tools.executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["SearchSubagent", "SearchResult"]
+
 # Max parallel file reads per batch
 MAX_PARALLEL_READS = 8
 # Max lines per snippet returned to Generator

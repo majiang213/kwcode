@@ -33,7 +33,7 @@ class TaskResult(BaseModel):
 class HealthResponse(BaseModel):
     """Health check response."""
     status: str = "ok"
-    version: str = "1.3.0"
+    version: str = "1.5.0"
     model: str = ""
     project_root: str = ""
 
@@ -61,3 +61,10 @@ class FileContent(BaseModel):
     content: str
     language: str = ""
     lines: int = 0
+
+
+class ManifestResponse(BaseModel):
+    """UpstreamManifest state response."""
+    signatures: dict[str, dict[str, str]] = Field(default_factory=dict)
+    constants: dict[str, dict[str, str]] = Field(default_factory=dict)
+    file_count: int = 0

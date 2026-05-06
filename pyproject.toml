@@ -8,7 +8,7 @@ version = "1.4.0"
 description = "KwCode - Local-model coding agent with MoE expert pipeline"
 requires-python = ">=3.10"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 keywords = ["coding-agent", "local-llm", "ollama", "code-generation"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -81,3 +81,17 @@ include = ["kaiwu*"]
 
 [tool.setuptools.package-data]
 "kaiwu.builtin_experts" = ["*.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

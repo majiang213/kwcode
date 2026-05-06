@@ -16,6 +16,8 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["UpstreamManifest"]
+
 
 class UpstreamManifest:
     """

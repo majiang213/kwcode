@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+__all__ = ["TaskCompiler", "WorktreeManager", "CycleError"]
+
 MAX_PARALLEL_WORKERS = 4
 
 
