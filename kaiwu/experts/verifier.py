@@ -6,6 +6,7 @@ RED-3: Independent context window, does not inherit Generator history.
 
 import json
 import logging
+import re
 from typing import Optional
 
 from kaiwu.core.context import TaskContext
@@ -81,6 +82,11 @@ class VerifierExpert:
                 "tests_passed": 0,
                 "tests_total": 0,
                 "error_detail": "All patches failed to apply",
+                "error_type": "patch_apply",
+                "error_file": "",
+                "error_line": 0,
+                "error_message": "All patches failed to apply",
+                "failed_tests": [],
             }
             ctx.verifier_output = result
             return result
@@ -100,12 +106,19 @@ class VerifierExpert:
 
         if not syntax_ok:
             self._rollback(backups)
+            error_msg = f"Syntax errors: {'; '.join(syntax_errors)}"
+            error_info = self._classify_error(error_msg)
             result = {
                 "passed": False,
                 "syntax_ok": False,
                 "tests_passed": 0,
                 "tests_total": 0,
-                "error_detail": f"Syntax errors: {'; '.join(syntax_errors)}",
+                "error_detail": error_msg,
+                "error_type": "syntax",
+                "error_file": error_info["error_file"],
+                "error_line": error_info["error_line"],
+                "error_message": error_msg[:200],
+                "failed_tests": [],
             }
             ctx.verifier_output = result
             return result
@@ -121,15 +134,66 @@ class VerifierExpert:
         if not passed:
             self._rollback(backups)
 
+        error_info = self._classify_error(test_error) if not passed else {
+            "error_type": "", "error_file": "", "error_line": 0,
+            "error_message": "", "failed_tests": []}
         result = {
             "passed": passed,
             "syntax_ok": syntax_ok,
             "tests_passed": tests_passed,
             "tests_total": tests_total,
             "error_detail": test_error if not passed else "",
+            "error_type": error_info["error_type"],
+            "error_file": error_info["error_file"],
+            "error_line": error_info["error_line"],
+            "error_message": error_info["error_message"],
+            "failed_tests": error_info["failed_tests"],
         }
         ctx.verifier_output = result
         return result
+
+    def _classify_error(self, error_detail: str) -> dict:
+        """Extract structured error info from pytest/compile output. Pure regex, no LLM."""
+        info = {"error_type": "unknown", "error_file": "", "error_line": 0,
+                "error_message": "", "failed_tests": []}
+
+        if not error_detail:
+            return info
+
+        # error_type classification
+        if "SyntaxError" in error_detail:
+            info["error_type"] = "syntax"
+        elif "AssertionError" in error_detail:
+            info["error_type"] = "assertion"
+        elif "ModuleNotFoundError" in error_detail or "ImportError" in error_detail:
+            info["error_type"] = "import"
+        elif "patch" in error_detail.lower() and "failed" in error_detail.lower():
+            info["error_type"] = "patch_apply"
+        elif any(exc in error_detail for exc in ("TypeError", "ValueError", "KeyError",
+                 "AttributeError", "NameError", "IndexError", "RuntimeError")):
+            info["error_type"] = "runtime"
+
+        # Extract file and line: File "xxx.py", line 42
+        file_match = re.search(r'File "([^"]+)", line (\d+)', error_detail)
+        if file_match:
+            info["error_file"] = file_match.group(1)
+            info["error_line"] = int(file_match.group(2))
+
+        # Extract failed test names: "FAILED tests/test_xxx.py::test_func"
+        info["failed_tests"] = re.findall(r'FAILED\s+(\S+::\S+)', error_detail)
+
+        # Extract error message
+        lines = [l.strip() for l in error_detail.splitlines() if l.strip()]
+        if lines:
+            for line in reversed(lines):
+                exc_match = re.match(r'(\w+Error|\w+Exception):\s*(.+)', line)
+                if exc_match:
+                    info["error_message"] = exc_match.group(2)[:200]
+                    break
+            if not info["error_message"] and lines:
+                info["error_message"] = lines[-1][:200]
+
+        return info
 
     def _run_tests(self, ctx: TaskContext) -> tuple[int, int, str]:
         """Run project tests. Returns (passed, total, error_detail)."""
@@ -168,7 +232,6 @@ class VerifierExpert:
     @staticmethod
     def _parse_test_output(output: str) -> tuple[int, int]:
         """Parse test counts from pytest/unittest output."""
-        import re
 
         # pytest format: "5 passed" or "3 passed, 2 failed"
         passed_match = re.search(r"(\d+) passed", output)

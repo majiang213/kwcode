@@ -445,6 +445,44 @@ REPL_COMMANDS = {
 }
 
 
+class SessionState:
+    """Tracks session state for multi-turn coherence and System Reminders."""
+
+    def __init__(self):
+        self.tasks_this_session: list[dict] = []
+        self.files_touched: set = set()
+        self.turn_count: int = 0
+
+    def record_task(self, user_input: str, success: bool, files: list[str], elapsed: float):
+        """Record a completed task."""
+        self.turn_count += 1
+        self.tasks_this_session.append({
+            "input": user_input[:100],
+            "success": success,
+            "files": files[:5],
+            "elapsed": elapsed,
+        })
+        self.files_touched.update(files)
+
+    def to_reminder(self) -> str:
+        """Generate System Reminder text for injection into Gate memory_context."""
+        if not self.tasks_this_session:
+            return ""
+        recent = self.tasks_this_session[-3:]
+        lines = ["[本次会话已完成]"]
+        for t in recent:
+            status = "OK" if t["success"] else "FAIL"
+            files_str = ", ".join(t["files"][:2]) if t["files"] else ""
+            line = f"- [{status}] {t['input'][:40]}"
+            if files_str:
+                line += f" → {files_str}"
+            lines.append(line)
+        if self.files_touched:
+            touched = list(self.files_touched)[:5]
+            lines.append(f"[已修改文件] {', '.join(touched)}")
+        return "\n".join(lines)
+
+
 VERSION = "0.9.0"
 
 # ── Shadow/重影大字 KAIWU ──
@@ -538,6 +576,7 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose, no_search
     tps_estimator = TokPerSecEstimator()
     pruner = ContextPruner(max_tokens=status.ctx_max)
     conversation_history: list[dict] = []
+    session_state = SessionState()
 
     # Background VRAM watcher
     vram_watcher = VRAMWatcher(status)
@@ -776,6 +815,16 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose, no_search
         t0 = time.perf_counter()
         # P2: Small model forces plan mode (问题6修复：用户可通过 no_search 间接控制)
         effective_plan = plan_next or (model_strategy.force_plan_mode and not no_search)
+
+        # Inject session reminder into memory context for Gate
+        session_reminder = session_state.to_reminder()
+        if session_reminder and session_state.turn_count % 5 == 0:
+            # Every 5 turns, also re-inject KWCODE.md core rules (attention decay countermeasure)
+            from kaiwu.core.kwcode_md import load_kwcode_md, build_kwcode_system
+            kwcode_sections = load_kwcode_md(project_root)
+            if kwcode_sections and "all" in kwcode_sections:
+                session_reminder += f"\n\n[项目规则提醒]\n{kwcode_sections['all'][:500]}"
+
         success = _run_task(
             task=user_input,
             gate=gate,
@@ -794,6 +843,19 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose, no_search
             
         elapsed = time.perf_counter() - t0
         plan_next = False  # Reset plan flag
+
+        # Record task in session state
+        task_files = []
+        if success:
+            try:
+                last_result = getattr(orchestrator, '_last_result', None)
+                if last_result and last_result.get("context"):
+                    ctx = last_result["context"]
+                    if ctx.generator_output:
+                        task_files = [p.get("file", "") for p in ctx.generator_output.get("patches", [])]
+            except Exception:
+                pass
+        session_state.record_task(user_input, success, task_files, elapsed)
 
         # Update tok/s estimator (rough: use elapsed as proxy)
         tps_estimator.record("x" * int(elapsed * 15), elapsed)  # ~15 tok/s estimate

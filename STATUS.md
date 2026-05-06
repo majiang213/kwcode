@@ -7,9 +7,44 @@
 
 ---
 
-## 当前状态：v0.9.0 (2026-04-29)
+## 当前状态：v1.1.0 (2026-05-06)
 
-292/292 测试全绿。Python专家系统已移除，改为正确方向。
+328/328 测试全绿（不含bench_tasks存根）。P0+P1优化全部完成。
+
+### v1.1.0 新增：P0+P1 优化（7文件 +362行）
+
+**P0-1: Verifier结构化输出** (`experts/verifier.py`)
+- `_classify_error()` 纯正则提取 error_type/error_file/error_line/error_message/failed_tests
+- 5种错误类型：syntax/assertion/import/runtime/patch_apply
+- 所有错误路径统一返回结构化字段，DebugSubagent不再需要自己解析
+
+**P0-2: 熔断器+缩小scope** (`core/orchestrator.py`)
+- syntax错误1次后直接熔断（重试无意义）
+- import错误立即熔断+提示安装依赖
+- 同类error_type连续3次→硬熔断
+- 第2次失败自动缩小scope到第一个文件+函数
+- 低置信度(<0.6)任务自动减少重试预算
+
+**P0-3: Gate置信度输出** (`core/gate.py`)
+- `_estimate_confidence()` 关键词信号强度评分（0.92/0.75/0.55三档）
+- 不覆盖expert_registry已有的confidence
+- orchestrator消费：低置信度减少max_retries
+
+**P1-1: Experience Replay** (`flywheel/trajectory_collector.py` + `core/orchestrator.py` + `core/context.py`)
+- `find_similar()` BM25检索历史成功轨迹（复用已有rank-bm25依赖）
+- orchestrator.run()开头自动调用，结果存入ctx.similar_trajectories
+- 飞轮闭环：同类任务不走冷启动
+
+**P1-2: Session内多轮连贯** (`cli/main.py`)
+- SessionState类：跟踪tasks/files_touched/turn_count
+- `to_reminder()` 生成System Reminder注入Gate memory_context
+- 每5轮重新注入KWCODE.md核心规则（注意力衰减对抗）
+
+**P1-3: Locator最小上下文裁剪** (`experts/locator.py`)
+- 函数边界识别（indent-based，def到下一个同级def）
+- 去掉纯注释行，docstring限3行
+- 60行/函数上限，gap marker标记不连续区域
+- 文件路径header + 行号前缀
 
 ### v0.9.0 新增
 

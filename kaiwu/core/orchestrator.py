@@ -214,6 +214,18 @@ class PipelineOrchestrator:
 
         self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')}")
 
+        # ── Experience Replay: find similar successful trajectories ──
+        if self.trajectory_collector and expert_type not in ("chat", "office", "vision"):
+            try:
+                similar = self.trajectory_collector.find_similar(user_input, expert_type, k=3)
+                if similar:
+                    ctx.similar_trajectories = similar
+                    best = similar[0]
+                    self._emit(on_status, "replay",
+                               f"发现相似成功案例：{best.get('user_input', '')[:40]}")
+            except Exception as e:
+                logger.debug("Experience replay failed (non-blocking): %s", e)
+
         # codegen任务如果涉及实时数据，首次就触发搜索（不等失败重试）
         if expert_type == "codegen" and not no_search and self._needs_realtime_data(user_input):
             self._emit(on_status, "search", "检测到实时数据需求，预搜索...")
@@ -232,6 +244,13 @@ class PipelineOrchestrator:
 
         # Dynamic retry budget based on task difficulty
         max_retries = self._get_max_retries(gate_result)
+
+        # Low confidence: reduce retry budget (not worth many attempts)
+        confidence = gate_result.get("confidence", 1.0)
+        if confidence < 0.6 and expert_type not in ("chat", "office", "vision"):
+            max_retries = min(max_retries, 2)
+            self._emit(on_status, "low_confidence",
+                       f"任务分类置信度较低({confidence:.0%})，减少重试次数")
 
         while ctx.retry_count < max_retries:
             success = self._run_sequence(sequence, ctx, on_status)
@@ -276,6 +295,51 @@ class PipelineOrchestrator:
 
             # Save failure info for retry strategy
             ctx.previous_failure = error_detail
+
+            # ── Circuit breaker: same error_type streak ──
+            current_error_type = ""
+            if ctx.verifier_output:
+                current_error_type = ctx.verifier_output.get("error_type", "unknown")
+
+            if not hasattr(ctx, '_error_type_streak'):
+                ctx._error_type_streak = {"type": "", "count": 0}
+
+            if current_error_type and current_error_type == ctx._error_type_streak["type"]:
+                ctx._error_type_streak["count"] += 1
+            else:
+                ctx._error_type_streak = {"type": current_error_type, "count": 1}
+
+            # Fast circuit break: syntax errors don't improve with retries
+            if current_error_type == "syntax" and ctx.retry_count >= 1:
+                self._emit(on_status, "circuit_break", "语法错误重试无效，模型能力不足以完成此任务")
+                break
+            # Fast circuit break: missing imports need user action
+            if current_error_type == "import":
+                missing = ctx.verifier_output.get("error_message", "") if ctx.verifier_output else ""
+                self._emit(on_status, "circuit_break", f"缺少依赖：{missing}，请先安装")
+                break
+            # Hard circuit break: same error type 3 times in a row
+            if ctx._error_type_streak["count"] >= 3:
+                self._emit(on_status, "circuit_break",
+                           f"同类错误({current_error_type})连续{ctx._error_type_streak['count']}次，停止重试")
+                break
+
+            # ── Scope narrowing: on 2nd failure, reduce to first file+function ──
+            if ctx.retry_count == 2 and ctx.locator_output:
+                files = ctx.locator_output.get("relevant_files", [])
+                funcs = ctx.locator_output.get("relevant_functions", [])
+                if len(files) > 1 and funcs:
+                    ctx.locator_output = {
+                        "relevant_files": [files[0]],
+                        "relevant_functions": [funcs[0]],
+                        "edit_locations": ctx.locator_output.get("edit_locations", [])[:1],
+                        "method": "scope_narrowed",
+                    }
+                    if ctx.relevant_code_snippets:
+                        ctx.relevant_code_snippets = {
+                            files[0]: ctx.relevant_code_snippets.get(files[0], "")
+                        }
+                    self._emit(on_status, "scope_narrow", f"缩小范围：只修 {funcs[0]}()")
 
             self._emit(on_status, "retry", f"第{ctx.retry_count}次尝试失败：{error_detail[:100]}")
 

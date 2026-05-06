@@ -177,7 +177,7 @@ class LocatorExpert:
             content = self.tools.read_file(fpath)
             if content.startswith("[ERROR]"):
                 continue
-            snippet = self._extract_snippet(content, relevant_functions)
+            snippet = self._extract_snippet(content, relevant_functions, file_path=fpath)
             if snippet:
                 code_snippets[fpath] = snippet
 
@@ -234,7 +234,7 @@ class LocatorExpert:
             content = self.tools.read_file(fpath)
             if content.startswith("[ERROR]"):
                 continue
-            snippet = self._extract_snippet(content, all_functions)
+            snippet = self._extract_snippet(content, all_functions, file_path=fpath)
             if snippet:
                 code_snippets[fpath] = snippet
 
@@ -356,8 +356,9 @@ class LocatorExpert:
         verified_locs = [f"{file_path}:{f}" for f in verified_funcs]
         return verified_funcs, verified_locs
 
-    def _extract_snippet(self, content: str, functions: list[str]) -> str:
-        """Extract code around target functions (+-20 lines)."""
+    def _extract_snippet(self, content: str, functions: list[str], file_path: str = "") -> str:
+        """Extract minimal context around target functions. Identifies function boundaries,
+        strips comments/docstrings, caps at 60 lines per function."""
         if not functions:
             return content[:2000]
 
@@ -365,23 +366,105 @@ class LocatorExpert:
         collected = set()
 
         for func_name in functions:
-            # Strip class prefix for matching
             short_name = func_name.split(".")[-1] if "." in func_name else func_name
+            func_start = None
+            func_indent = -1
+
             for i, line in enumerate(lines):
-                if f"def {short_name}" in line or f"class {short_name}" in line:
-                    start = max(0, i - 5)
-                    end = min(len(lines), i + 40)
-                    for j in range(start, end):
+                stripped = line.lstrip()
+                if (f"def {short_name}" in line or f"class {short_name}" in line) and stripped.startswith(("def ", "class ")):
+                    func_start = i
+                    func_indent = len(line) - len(stripped)
+                    break
+
+            if func_start is None:
+                # Fallback: grab +-20 lines around keyword match
+                for i, line in enumerate(lines):
+                    if short_name in line:
+                        start = max(0, i - 5)
+                        end = min(len(lines), i + 25)
+                        for j in range(start, end):
+                            collected.add(j)
+                        break
+                continue
+
+            # Find function end: next def/class at same or lower indent level
+            func_end = len(lines)
+            for i in range(func_start + 1, len(lines)):
+                line = lines[i]
+                if not line.strip():
+                    continue
+                current_indent = len(line) - len(line.lstrip())
+                if current_indent <= func_indent and line.lstrip().startswith(("def ", "class ", "@")):
+                    func_end = i
+                    break
+
+            # Include decorators above function (up to 3 lines)
+            decorator_start = func_start
+            for i in range(func_start - 1, max(func_start - 4, -1), -1):
+                if i >= 0 and lines[i].lstrip().startswith("@"):
+                    decorator_start = i
+                else:
+                    break
+
+            # Collect lines, skip pure comment blocks in the middle
+            start = decorator_start
+            end = min(func_end, func_start + 60)  # Cap at 60 lines
+            in_docstring = False
+            docstring_lines = 0
+
+            for j in range(start, end):
+                line = lines[j]
+                stripped = line.strip()
+
+                # Track docstring boundaries
+                if '"""' in stripped or "'''" in stripped:
+                    if in_docstring:
+                        in_docstring = False
+                        docstring_lines += 1
+                        if docstring_lines <= 3:
+                            collected.add(j)
+                        continue
+                    else:
+                        in_docstring = True
+                        docstring_lines = 0
+                        if stripped.endswith('"""') and stripped.count('"""') == 2:
+                            # Single-line docstring
+                            in_docstring = False
+                            collected.add(j)
+                            continue
                         collected.add(j)
+                        continue
+
+                if in_docstring:
+                    docstring_lines += 1
+                    if docstring_lines <= 3:
+                        collected.add(j)
+                    continue
+
+                # Skip pure comment lines (but keep inline comments)
+                if stripped.startswith("#") and j > func_start + 1:
+                    # Keep comments that look structural
+                    if any(kw in stripped for kw in ("TODO", "FIXME", "NOTE", "HACK", "──")):
+                        collected.add(j)
+                    continue
+
+                collected.add(j)
 
         if not collected:
             return content[:2000]
 
         sorted_lines = sorted(collected)
         result = []
+        prev_idx = -2
         for idx in sorted_lines:
+            if idx - prev_idx > 1 and prev_idx >= 0:
+                result.append("     | ...")  # Gap marker
             result.append(f"{idx + 1:4d} | {lines[idx]}")
-        return "\n".join(result)
+            prev_idx = idx
+
+        header = f"# {file_path}\n" if file_path else ""
+        return header + "\n".join(result)
 
     @staticmethod
     def _parse_file_list(raw: str) -> list[str]:

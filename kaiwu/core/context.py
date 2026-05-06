@@ -67,3 +67,6 @@ class TaskContext:
 
     # 上游依赖结果摘要（Active Context，≤2K tokens，供Gate/Generator看）
     upstream_summary: str = ""
+
+    # Experience Replay: similar successful trajectories from history
+    similar_trajectories: list = field(default_factory=list)

@@ -131,3 +131,46 @@ class TrajectoryCollector:
             t for t in self._load_all()
             if t.gate_result.get("expert_name") == expert_name
         ]
+
+    def find_similar(self, user_input: str, expert_type: str, k: int = 3) -> list[dict]:
+        """
+        BM25 retrieval of similar successful trajectories.
+        Returns: [{"user_input": str, "pipeline": list, "files_modified": list, "latency_s": float}]
+        """
+        candidates = self._load_successful(expert_type)
+        if not candidates:
+            return []
+
+        try:
+            from rank_bm25 import BM25Okapi
+        except ImportError:
+            logger.debug("[trajectory] rank_bm25 not available, skipping similarity search")
+            return []
+
+        corpus = [t["user_input"].split() for t in candidates]
+        bm25 = BM25Okapi(corpus)
+        scores = bm25.get_scores(user_input.split())
+        top_k = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
+        return [candidates[i] for i in top_k if scores[i] > 0.1]
+
+    def _load_successful(self, expert_type: str, limit: int = 200) -> list[dict]:
+        """Load successful trajectories of given type, most recent first, up to limit."""
+        if not os.path.isdir(self._dir):
+            return []
+
+        trajs = []
+        fnames = sorted(os.listdir(self._dir), reverse=True)
+        for fname in fnames[:500]:
+            if not fname.endswith(".json"):
+                continue
+            path = os.path.join(self._dir, fname)
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if data.get("success") and data.get("expert_used") == expert_type:
+                    trajs.append(data)
+                    if len(trajs) >= limit:
+                        break
+            except Exception:
+                continue
+        return trajs

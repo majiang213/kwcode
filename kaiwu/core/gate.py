@@ -154,6 +154,10 @@ class Gate:
                     result["route_type"] = "general_with_expert"
                     # 不覆盖pipeline，让orchestrator用通用的EXPERT_SEQUENCES
 
+        # Inject confidence if not already set by expert registry
+        if "confidence" not in result:
+            result["confidence"] = self._estimate_confidence(result, user_input)
+
         return result
 
     @staticmethod
@@ -224,3 +228,31 @@ class Gate:
         if start != -1 and end != -1 and end > start:
             return text[start:end + 1]
         return text.strip()
+
+    def _estimate_confidence(self, result: dict, user_input: str) -> float:
+        """
+        Estimate classification confidence based on keyword signal strength.
+        High confidence = user input contains clear type-signal words.
+        No LLM call, pure rules, <1ms.
+        """
+        et = result.get("expert_type", "")
+        lower = user_input.lower()
+
+        STRONG_SIGNALS = {
+            "locator_repair": ["修复", "fix", "bug", "报错", "错误", "失败", ".py:", "line "],
+            "codegen":        ["写一个", "创建", "生成", "新建", "from scratch", "写个"],
+            "refactor":       ["重构", "优化", "整理", "拆分", "extract", "rename"],
+            "office":         [".xlsx", ".docx", ".pptx", "excel", "幻灯片", "演示文稿"],
+            "chat":           ["你好", "什么是", "解释", "为什么", "怎么理解"],
+            "vision":         ["图片", "截图", "设计图", "image", "screenshot"],
+        }
+
+        signals = STRONG_SIGNALS.get(et, [])
+        matched = sum(1 for s in signals if s in lower)
+
+        if matched >= 2:
+            return 0.92
+        elif matched == 1:
+            return 0.75
+        else:
+            return 0.55
