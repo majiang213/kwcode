@@ -144,6 +144,9 @@ class TaskCompiler:
                 upstream_text = self._format_upstream_text(upstream_dict)
                 user_input = f"{user_input}\n\n[前置任务结果]\n{upstream_text}"
 
+            # PENCIL-style: update orchestrator's manifest with upstream patches
+            self._update_manifest_from_deps(deps, completed)
+
         # Gate classification (use override or auto-classify)
         expert_type = task_def.get("expert_type")
         if expert_type:
@@ -169,7 +172,75 @@ class TaskCompiler:
         if result.get("context") and upstream_dict:
             result["context"].upstream_summary = upstream_dict
 
+        # PENCIL-style compact: store only structured artifacts for downstream
+        if result.get("success") and result.get("context"):
+            result["_compact"] = self._compact_subtask_result(result)
+
         return result
+
+    def _compact_subtask_result(self, result: dict) -> dict:
+        """
+        PENCIL-style compression: only keep structured artifacts for downstream.
+        Discard: full reasoning chains, intermediate code snippets, debug logs.
+        Keep: function signatures, constants, file paths, test status.
+        """
+        ctx = result.get("context")
+        if not ctx:
+            return {}
+
+        patches = []
+        if ctx.generator_output:
+            patches = ctx.generator_output.get("patches", [])
+
+        modified_files = [p.get("file", "") for p in patches if p.get("file")]
+
+        # Extract signatures from modified code
+        signatures = {}
+        for patch in patches:
+            modified = patch.get("modified", "")
+            if modified:
+                import re
+                for m in re.finditer(r'def\s+(\w+)\s*\(([^)]*)\)', modified):
+                    signatures[m.group(1)] = f"def {m.group(1)}({m.group(2)})"
+
+        # Extract constants
+        constants = {}
+        for patch in patches:
+            modified = patch.get("modified", "")
+            if modified:
+                import re
+                for m in re.finditer(r'^([A-Z][A-Z_0-9]+)\s*=\s*(.+?)$', modified, re.MULTILINE):
+                    constants[m.group(1)] = m.group(2).strip()[:80]
+
+        test_status = ""
+        if ctx.verifier_output:
+            if ctx.verifier_output.get("passed"):
+                tp = ctx.verifier_output.get("tests_passed", 0)
+                tt = ctx.verifier_output.get("tests_total", 0)
+                test_status = f"passed ({tp}/{tt})"
+            else:
+                test_status = "failed"
+
+        return {
+            "modified_files": modified_files,
+            "signatures": signatures,
+            "constants": constants,
+            "test_status": test_status,
+        }
+
+    def _update_manifest_from_deps(self, dep_ids: list[str], completed: dict):
+        """Update orchestrator's UpstreamManifest with patches from completed deps."""
+        try:
+            manifest = self.orchestrator._manifest
+            for dep_id in dep_ids:
+                result = completed.get(dep_id)
+                if not result or not result.get("context"):
+                    continue
+                ctx = result["context"]
+                if ctx.generator_output and ctx.generator_output.get("patches"):
+                    manifest.update(ctx.generator_output["patches"])
+        except Exception as e:
+            logger.debug("[task_compiler] manifest update failed (non-blocking): %s", e)
 
     @staticmethod
     def _build_dependency_context(dep_ids: list[str], completed: dict) -> dict:
