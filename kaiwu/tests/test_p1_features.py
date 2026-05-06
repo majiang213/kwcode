@@ -349,13 +349,14 @@ Connection pooling is configured in src/db/pool.py.
 
     def test_cache(self):
         from kaiwu.knowledge.doc_reader import DocReader
+        from pathlib import Path
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, "doc.md"), "w", encoding="utf-8") as f:
                 f.write("This is a test document with enough content to be a paragraph.\n")
             reader = DocReader(d)
             reader.find_relevant("test")
-            # Second call should use cache
-            assert str(os.path.join(d, "doc.md")) in reader._cache
+            # Second call should use cache (use resolved path for comparison)
+            assert str(Path(d, "doc.md").resolve()) in reader._cache
 
 
 # ── PatternMd.count_similar_failures ───────────────────────
