@@ -188,9 +188,9 @@ kwcode/
 
 ## TODO
 
-1. CLI refactor: split main.py (1861 lines) into cli/commands/
-2. Comments: unify to English across all modules
-3. Expert-level EventBus emit (file reads, function locations, test results)
+1. ~~CLI refactor: split main.py (1861 lines) into cli/commands/~~ ✅ v1.5.0
+2. ~~Comments: unify to Chinese across all modules~~ ✅ v1.5.0
+3. ~~Expert-level EventBus emit (file reads, function locations, test results)~~ ✅ v1.5.0
 4. SQLite cross-session queries
 5. Full expert benchmark (12 presets)
 6. pip publish to PyPI
