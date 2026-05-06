@@ -9,8 +9,8 @@
 
 ## Current: v1.5.1 (2026-05-06)
 
-470/470 tests green (451旧 + 19新) + 67个bench tasks。
-三飞轮系统 + 匿名遥测(opt-in) + 服务端部署(https://llmbbs.com)。
+501/501 tests green + 67个bench tasks。
+三飞轮 + 匿名遥测 + Hashline锚点编辑 + AdaptThink + Fast/Slow双阶段 + 审计日志 + model命令 + model_capability全量接入 + ctx自适应主动设置 + prompt量化改造。
 
 ### v1.5.1 — Flywheel + Anonymous Telemetry
 

@@ -4,6 +4,70 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.5.1] - 2026-05-06
+
+### 三飞轮 + 遥测 + 模型自适应 + 前沿算法
+
+**理论来源**：Hashline(oh-my-pi锚点编辑) + AdaptThink(自适应推理) + Thinker(Fast/Slow双过程) + Claude Code(prompt行为工程)
+
+### Added
+
+- **三飞轮系统**（全部本地存储）：
+  - `flywheel/strategy_stats.py`：错误策略有效性统计，按error_type×sequence累计成功率，min_attempts≥10时自动优化重试顺序
+  - `flywheel/user_pattern_memory.py`：跨项目用户错误模式记忆，20+任务后自动注入中文提示
+  - `flywheel/skill_drafter.py`：SKILL.md自动提炼，30+成功轨迹生成草稿
+
+- **匿名遥测**（opt-in，默认关闭）：
+  - `telemetry/client.py`：HMAC-SHA256签名 + fire-and-forget上传
+  - 只上传：error_type, retry_count, success, model（绝不上传代码/路径/描述）
+  - 服务端：https://llmbbs.com (nginx→FastAPI, 3张SQLite表, IP限流30/min)
+  - CLI：`kwcode telemetry status/enable/disable`，`kwcode skill review/accept/discard`
+
+- **Hashline锚点编辑**（P0）：
+  - `tools/hashline.py`：每行6字符MD5锚点，EDIT/DELETE/INSERT_AFTER指令
+  - Generator首次尝试hashline（1024 tokens），失败fallback全函数生成
+  - 哈希不匹配→拒绝全部编辑（防止写入脏数据）
+
+- **AdaptThink自适应推理**（P1）：
+  - `core/think_config.py`：按expert_type×difficulty自动选择think预算
+  - easy→off, medium→512, hard→2048-4096, chat/office→always off
+
+- **Fast/Slow双阶段推理**（P2）：
+  - 第一次fast(think=off)，第一次失败升级slow(budget=2048)，第二次失败最大budget(4096)
+
+- **审计日志**：
+  - `audit/logger.py`：持久化任务执行轨迹为JSON，最多100条
+  - CLI：`kwcode log` / `kwcode log show <id>` / `kwcode log clear`
+
+- **kwcode model命令**：
+  - `kwcode model`：查看当前模型+tier
+  - `kwcode model set <name>`：切换模型
+  - `kwcode model probe`：探测模型详情
+
+- **model_capability全量接入**：
+  - orchestrator检测tier→ctx注入→Generator按tier切prompt约束
+  - SMALL：严格约束(1函数/≤10行/保持缩进/禁解释/禁工具描述)
+  - ctx自适应：4层探测(llama.cpp→vLLM→Ollama→离线表)，Ollama每次请求主动设num_ctx
+
+### Changed
+
+- **Prompt量化改造**（CC风格）：
+  - "只做任务要求的事" → "每次patch≤2函数，≤30行"
+  - "缩小修改范围" → "只修改1个函数，≤15行"
+  - GENERATOR_PROMPT/NEWFILE/TEST：正面指令替代负面指令，删除工具描述
+  - CHAT_SYSTEM：删除无用工具描述，≤100字/≤3句
+  - RETRY_STRATEGIES hints：每种错误类型量化行数限制
+
+- **版本号统一**：pyproject.toml为唯一真相源，其他文件通过importlib.metadata读取
+
+### Fixed
+
+- **缩进对齐bug**：`Generator._align_indentation()`修复class方法缩进丢失（LLM返回0空格→原始4空格对齐）
+- **JSON解析崩溃**：debug_subagent(×2) + checkpoint(×2) + ast_grep_engine(×1) 加try/except保护
+- **版本号测试**：test_server.py硬编码"1.5.0"→动态`__version__`
+
+---
+
 ## [1.4.0] - 2026-05-06
 
 ### 多语言 + TUI + IDE兼容（3 个模块）

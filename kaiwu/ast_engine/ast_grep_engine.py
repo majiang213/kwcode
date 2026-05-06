@@ -149,7 +149,10 @@ def _query_cli(pattern: str, lang: str, code: str) -> list[dict]:
         )
         if result.returncode != 0 or not result.stdout.strip():
             return []
-        data = json.loads(result.stdout)
+        try:
+            data = json.loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
+            return []
         results = []
         for item in data:
             rng = item.get("range", {})
