@@ -113,7 +113,7 @@ class DocReader:
         return result
 
     def _read_file(self, path: Path) -> list[str]:
-        key = str(path)
+        key = str(path.resolve())
         if key in self._cache:
             return self._cache[key]
 
