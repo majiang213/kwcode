@@ -97,6 +97,21 @@
 - ThinkConfig: easy/hard/chat/unknown/apply_tokens (8)
 - FastSlow: default/escalation (1)
 
+**Reviewer闭环（关键架构修复）**
+- 原问题：Reviewer发现"改错文件"只记日志，不触发重试，36任务假成功
+- 修复：_record_success返回None → retry loop捕获 → 重置Generator/Verifier → 重试
+- review gap注入ctx.retry_hint，Generator下次修正方向
+- Reviewer prompt增强：注入initial_test_failure让LLM看到测试期望
+
+**Verifier 0/0假成功消除**
+- tests_total=0时检查是否有测试文件存在
+- 有测试文件但0执行 → passed=False，报错"测试未执行"
+- 消除benchmark 36/37任务"audit成功但bench失败"的根因
+
+**Syntax熔断按tier区分**
+- SMALL：1次重试后熔断（小模型重复同样错误）
+- MEDIUM/LARGE：2次重试后熔断（32B第一次syntax error常是偶然）
+
 **Test-First Loop（CC架构核心改动）**
 - orchestrator.run()：locator_repair/refactor任务先调verifier.run_tests_only()拿测试报错
 - locator.locate_from_test_error()：从pytest/go test报错提取File+行号，精准定位（不靠语义搜索猜）
