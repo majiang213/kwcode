@@ -441,6 +441,7 @@ REPL_COMMANDS = {
     "/api":     "API配置 (用法: /api show | /api temp <url> | /api default <url>)",
     "/paste":   "从剪贴板粘贴图片",
     "/image":   "添加图片文件 (用法: /image <path>)",
+    "/stats":   "查看任务统计和Gate准确率",
     "/exit":    "退出",
 }
 
@@ -711,6 +712,30 @@ def _repl(model_path, ollama_url, ollama_model, project_root, verbose, no_search
                     sr = perf.get("success_rate", 0.0)
                     kws = ", ".join(e["trigger_keywords"][:4])
                     console.print(f"  [bold]{e['name']}[/bold] [{lc}] tasks={cnt} sr={sr:.0%} kw=[{kws}]")
+
+            elif cmd == "/stats":
+                from kaiwu.stats.value_tracker import ValueTracker
+                tracker = ValueTracker()
+                summary = tracker.get_summary(days=30)
+                gate_acc = tracker.get_gate_accuracy(days=30)
+
+                console.print("\n  [bold]任务统计（近30天）[/bold]")
+                console.print(f"  总任务: {summary['total_tasks']} | 成功: {summary['succeeded_tasks']} | "
+                              f"成功率: {summary['succeeded_tasks']/max(summary['total_tasks'],1)*100:.0f}%")
+                console.print(f"  节省时间: ~{summary['time_saved_hours']}h | 累计: {summary['total_all_time']} 个任务")
+
+                if gate_acc:
+                    console.print("\n  [bold]Gate路由准确率[/bold]")
+                    console.print("  [dim]类型          总数  成功率  平均耗时  平均重试[/dim]")
+                    for g in gate_acc:
+                        sr = f"{g['success_rate']*100:.0f}%"
+                        console.print(
+                            f"  {g['expert_type']:14s} {g['total']:4d}  {sr:>5s}  "
+                            f"{g['avg_elapsed']:5.1f}s  {g['avg_retries']:.1f}次"
+                        )
+                else:
+                    console.print("\n  [dim]暂无Gate路由数据（需要执行几个任务后才有统计）[/dim]")
+                console.print()
 
             elif cmd == "/plan":
                 if arg:

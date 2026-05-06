@@ -131,3 +131,37 @@ class ValueTracker:
                 return row["c"] or 0
         except Exception:
             return 0
+
+    def get_gate_accuracy(self, days: int = 30) -> list[dict]:
+        """
+        Gate routing accuracy report: success rate per expert_type.
+        P2: Shows which Gate classifications lead to successful outcomes.
+        """
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        try:
+            with self._get_conn() as conn:
+                rows = conn.execute("""
+                    SELECT expert_type,
+                           COUNT(*) as total,
+                           SUM(success) as succeeded,
+                           AVG(elapsed_s) as avg_elapsed,
+                           AVG(retry_count) as avg_retries
+                    FROM task_stats
+                    WHERE timestamp > ? AND expert_type != ''
+                    GROUP BY expert_type
+                    ORDER BY total DESC
+                """, (since,)).fetchall()
+
+                return [
+                    {
+                        "expert_type": row["expert_type"],
+                        "total": row["total"],
+                        "success_rate": (row["succeeded"] or 0) / row["total"] if row["total"] > 0 else 0,
+                        "avg_elapsed": round(row["avg_elapsed"] or 0, 1),
+                        "avg_retries": round(row["avg_retries"] or 0, 1),
+                    }
+                    for row in rows
+                ]
+        except Exception as e:
+            logger.debug("[value_tracker] get_gate_accuracy failed: %s", e)
+            return []

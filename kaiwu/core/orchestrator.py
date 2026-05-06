@@ -6,6 +6,7 @@ RED-5: Max 3 retries, hardcoded.
 
 import logging
 import time
+import threading
 from typing import Optional
 
 from kaiwu.core.context import TaskContext
@@ -96,6 +97,17 @@ class PipelineOrchestrator:
         Returns {"success": bool, "context": TaskContext, "error": str|None, "elapsed": float}.
         """
         start_time = time.time()
+
+        # ── Watchdog: task-level timeout (P2) ──
+        TASK_TIMEOUT_S = 300  # 5 minutes max per task
+        _watchdog_triggered = threading.Event()
+
+        def _watchdog_timer():
+            _watchdog_triggered.set()
+
+        _watchdog = threading.Timer(TASK_TIMEOUT_S, _watchdog_timer)
+        _watchdog.daemon = True
+        _watchdog.start()
 
         # Store project_root for Gate 2 backtest use
         self._backtest_project_root = project_root
@@ -253,6 +265,11 @@ class PipelineOrchestrator:
                        f"任务分类置信度较低({confidence:.0%})，减少重试次数")
 
         while ctx.retry_count < max_retries:
+            # Watchdog check: abort if task exceeded timeout
+            if _watchdog_triggered.is_set():
+                self._emit(on_status, "watchdog", f"任务超时({TASK_TIMEOUT_S}s)，强制终止")
+                break
+
             success = self._run_sequence(sequence, ctx, on_status)
 
             # Notify locator of task result (graph stats + incremental update)
@@ -373,6 +390,7 @@ class PipelineOrchestrator:
             # Clear ephemeral debug info to prevent context pollution
             ctx.debug_info = ""
 
+        _watchdog.cancel()  # Clean up watchdog timer
         elapsed = time.time() - start_time
 
         # ── Checkpoint: restore on failure ──
