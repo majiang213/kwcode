@@ -278,6 +278,7 @@ class GeneratorExpert:
                     continue
 
                 # 对齐缩进：LLM返回的modified可能丢失class内方法的缩进
+                modified = modified.strip("\n")  # 清掉前后空行再对齐
                 modified = self._align_indentation(original, modified)
 
                 # Verify original exists in file (should always be true since we read it)

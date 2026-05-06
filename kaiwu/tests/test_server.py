@@ -57,7 +57,8 @@ class TestServerHealth:
                 assert resp.status_code == 200
                 data = resp.json()
                 assert data["status"] == "ok"
-                assert data["version"] == "1.5.0"
+                from kaiwu import __version__
+                assert data["version"] == __version__
                 assert data["model"] == "test-model"
 
         asyncio.run(_test())
@@ -222,7 +223,8 @@ class TestServerModels:
         from kaiwu.server.models import HealthResponse
         resp = HealthResponse(model="qwen3-8b", project_root="/tmp")
         assert resp.status == "ok"
-        assert resp.version == "1.5.0"
+        from kaiwu import __version__
+        assert resp.version == __version__
 
     def test_file_content(self):
         from kaiwu.server.models import FileContent
