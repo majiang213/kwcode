@@ -4,6 +4,30 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.6.2] - 2026-05-07
+
+### Retry优化 + 润滑/免疫机制
+
+**核心理念**：让LLM在擅长的地方发挥最大效能，在不擅长的地方不让它发力。给最好的原材料，而不是更多的retry机制。
+
+### Changed
+
+- **Generator首次生成注入initial_test_failure**：LLM第一次就能看到具体哪些测试在失败、期望什么输出，不再盲目生成
+- **retry_hint携带具体失败测试名**：从verifier_output提取failed_tests列表注入hint，LLM重试时精确知道哪些测试还没过
+- **Reviewer在tests_total==0时跳过**：无测试证据时Reviewer会幻觉reject，现在直接放行
+- **think_escalate改为条件触发**：只在assertion错误（逻辑错误）时升级深度推理，syntax/patch_apply等错误想更久没用
+- **MISSING_TOOLCHAIN快速熔断**：工具链缺失时直接返回失败告知用户，不浪费retry
+
+### Removed
+
+- **scope narrowing**：删除第2次失败时缩小到第一个文件+函数的逻辑。第一次定位错了缩小只会更错，让Locator自然重新搜索
+
+### Added
+
+- **WinkMonitor免疫机制**：新增`tests_no_progress` pattern，检测连续retry后通过率未提升，注入"换方向"纠正hint
+
+---
+
 ## [1.5.1] - 2026-05-06
 
 ### 三飞轮 + 遥测 + 模型自适应 + 前沿算法

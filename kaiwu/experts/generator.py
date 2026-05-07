@@ -391,6 +391,11 @@ class GeneratorExpert:
         if ctx.doc_context:
             prompt += f"\n\n## 相关文档参考\n{ctx.doc_context[:800]}"
 
+        # 注入初始测试失败信息（让LLM第一次就看到具体报错）
+        initial_failure = getattr(ctx, 'initial_test_failure', '')
+        if initial_failure and ctx.retry_count == 0:
+            prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
+
         # Inject retry_hint if available
         if ctx.retry_hint:
             prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
@@ -434,6 +439,11 @@ class GeneratorExpert:
         )
         while "\n\n\n" in prompt:
             prompt = prompt.replace("\n\n\n", "\n\n")
+
+        # 注入初始测试失败信息
+        initial_failure = getattr(ctx, 'initial_test_failure', '')
+        if initial_failure and ctx.retry_count == 0:
+            prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
 
         if ctx.retry_hint:
             prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
@@ -824,6 +834,11 @@ class GeneratorExpert:
                 f"不要输出markdown代码块标记。\n"
                 f"实现所有pass存根函数，保持已有实现不变。"
             )
+
+            # 注入初始测试失败信息
+            initial_failure = getattr(ctx, 'initial_test_failure', '')
+            if initial_failure and ctx.retry_count == 0:
+                prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
 
             if ctx.retry_hint:
                 prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"

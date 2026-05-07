@@ -5,6 +5,7 @@ Wink 自修复监控：轨迹监控 + 偏离检测 + 课程纠正。
 - Specification Drift：偏离用户原始意图（scope creep）
 - Reasoning Problems：同类错误反复（原地打转）
 - Tool Call Failures：patch 持续失败
+- Progress Stall：重试未提升通过率（免疫机制）
 
 理论来源：
 - Wink: Recovering from Misbehaviors in Coding Agents（arXiv:2602.17037）
@@ -65,6 +66,17 @@ class WinkMonitor:
             ),
             "hint": "Generator 未产出有效 patch，尝试简化任务描述或缩小修改范围",
         },
+        # 免疫机制：重试未提升通过率（结疤，不改变结构）
+        {
+            "name": "tests_no_progress",
+            "detect": lambda ctx: (
+                ctx.retry_count >= 2 and
+                ctx.verifier_output and
+                hasattr(ctx, '_prev_tests_passed') and
+                ctx.verifier_output.get("tests_passed", 0) <= getattr(ctx, '_prev_tests_passed', 0)
+            ),
+            "hint": "连续重试未提升通过率，尝试完全不同的实现方式，不要在同一个方向上继续",
+        },
     ]
 
     def check(self, ctx, bus: Optional[EventBus] = None) -> Optional[str]:
@@ -72,6 +84,10 @@ class WinkMonitor:
         检查当前 context 是否有偏离，返回纠正 hint 或 None。
         非阻塞，任何异常静默忽略。
         """
+        # 记录本次tests_passed供下次比较（免疫机制的记忆）
+        if ctx.verifier_output:
+            ctx._prev_tests_passed = ctx.verifier_output.get("tests_passed", 0)
+
         for pattern in self.DRIFT_PATTERNS:
             try:
                 if pattern["detect"](ctx):

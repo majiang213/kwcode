@@ -310,6 +310,18 @@ class PipelineOrchestrator:
         # Gate 3: AB测试
         ab_candidate_name, ab_used_new, gate_result = self._setup_ab_test(gate_result, expert_type, on_status)
 
+        # MISSING_TOOLCHAIN快速熔断：工具链缺失时不进retry循环，直接告知用户
+        if ctx.gap and ctx.gap.gap_type == GapType.MISSING_TOOLCHAIN:
+            self._emit(on_status, "circuit_break",
+                       f"工具链缺失：{ctx.gap.error_msg[:100]}，请手动安装后重试")
+            self.bus.emit("circuit_break", {"msg": "missing_toolchain"})
+            elapsed = time.time() - start_time
+            _watchdog.cancel()
+            checkpoint = Checkpoint(project_root)
+            return self._record_failure_result(ctx, project_root, gate_result,
+                                               None, False, 0,
+                                               elapsed, checkpoint, False, on_status)
+
         # 优先使用专家注册表的自定义pipeline，否则用默认
         if gate_result.get("route_type") == "expert_registry" and "pipeline" in gate_result:
             sequence = gate_result["pipeline"]
@@ -441,24 +453,6 @@ class PipelineOrchestrator:
             if wink_hint:
                 ctx.retry_hint = (ctx.retry_hint + "\n" + wink_hint).strip() if ctx.retry_hint else wink_hint
 
-            # Scope narrowing: on 2nd failure, reduce to first file+function
-            if ctx.retry_count == 2 and ctx.locator_output:
-                files = ctx.locator_output.get("relevant_files", [])
-                funcs = ctx.locator_output.get("relevant_functions", [])
-                if len(files) > 1 and funcs:
-                    ctx.locator_output = {
-                        "relevant_files": [files[0]],
-                        "relevant_functions": [funcs[0]],
-                        "edit_locations": ctx.locator_output.get("edit_locations", [])[:1],
-                        "method": "scope_narrowed",
-                    }
-                    if ctx.relevant_code_snippets:
-                        ctx.relevant_code_snippets = {
-                            files[0]: ctx.relevant_code_snippets.get(files[0], "")
-                        }
-                    self._emit(on_status, "scope_narrow", f"缩小范围：只修 {funcs[0]}()")
-                    self.bus.emit("scope_narrow", {"msg": f"只修 {funcs[0]}()"})
-
             self._emit(on_status, "retry", f"第{ctx.retry_count}次尝试失败：{error_detail[:100]}")
             self.bus.emit("retry", {"count": ctx.retry_count, "error": error_detail[:100]})
 
@@ -473,15 +467,14 @@ class PipelineOrchestrator:
             # 设置重试策略：每次重试用不同方法
             ctx.retry_strategy = ctx.retry_count  # 0→1→2
 
-            # Fast/Slow双阶段：首次用fast(think=off)，失败后升级slow(think=on+高预算)
-            if ctx.retry_count == 1 and not ctx.think_config.get("think"):
-                # 第一次失败：从fast升级到slow think
-                ctx.think_config = {"think": True, "budget": 2048}
-                self._emit(on_status, "think_escalate", "升级到深度推理模式")
-            elif ctx.retry_count >= 2 and ctx.think_config.get("budget", 0) < 4096:
-                # 第二次失败：最大think预算
-                ctx.think_config = {"think": True, "budget": 4096}
-                self._emit(on_status, "think_escalate", "最大推理预算")
+            # Think escalation：只在assertion错误时升级（逻辑错误需要深度推理，其他错误想更久没用）
+            if current_error_type == "assertion":
+                if ctx.retry_count == 1 and not ctx.think_config.get("think"):
+                    ctx.think_config = {"think": True, "budget": 2048}
+                    self._emit(on_status, "think_escalate", "逻辑错误，升级到深度推理")
+                elif ctx.retry_count >= 2 and ctx.think_config.get("budget", 0) < 4096:
+                    ctx.think_config = {"think": True, "budget": 4096}
+                    self._emit(on_status, "think_escalate", "最大推理预算")
 
             # 错误驱动搜索：按失败类型决定是否搜索（网络保护：异常不阻塞）
             if self._should_search(current_error_type, ctx.retry_count) and not ctx.search_triggered and not no_search:
@@ -674,13 +667,13 @@ class PipelineOrchestrator:
                         ab_candidate_name, ab_used_new: bool, elapsed: float,
                         checkpoint, on_status) -> dict:
         """Record success: memory, registry, trajectory, AB, value, milestone, reflection."""
-        # Reviewer: 需求对齐审查 — 测试全部通过时跳过（测试是最终裁判，Reviewer会幻觉）
+        # Reviewer: 需求对齐审查 — 测试全部通过或无测试结果时跳过（无证据时Reviewer会幻觉）
         v = ctx.verifier_output or {}
         tests_passed = v.get("tests_passed", 0)
         tests_total = v.get("tests_total", 0)
-        all_tests_pass = tests_total > 0 and tests_passed == tests_total
+        skip_review = (tests_total > 0 and tests_passed == tests_total) or tests_total == 0
 
-        if not all_tests_pass:
+        if not skip_review:
             # 测试没全通过才需要Reviewer审查
             review_result = self._do_review(ctx, on_status)
             if review_result and not review_result.get("aligned") and review_result.get("confidence", 0) >= 0.7:
@@ -1085,6 +1078,11 @@ class PipelineOrchestrator:
 
         if last_code:
             hint += f"\n\n上次生成的代码（有问题）：\n{last_code}\n\n请不要重复同样的错误。"
+
+        # 携带具体失败的测试名，让LLM精确定位
+        failed_tests = (ctx.verifier_output or {}).get("failed_tests", [])
+        if failed_tests:
+            hint += "\n\n仍然失败的测试：\n" + "\n".join(f"  - {t}" for t in failed_tests[:5])
 
         return hint
 
