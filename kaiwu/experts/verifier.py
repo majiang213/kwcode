@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # 按优先级排序，首个匹配生效
 TEST_RUNNERS = {
     "python":     [
-        ("pytest", "python -m pytest tests/ --tb=short -q"),
+        ("pytest", "python -m pytest tests/ --tb=short -v"),
         ("unittest", "python -m unittest discover -s tests -q"),
     ],
     "javascript": [("jest", "npx jest --ci --passWithNoTests")],
@@ -99,8 +99,11 @@ class VerifierExpert:
                     "error_type": "missing_toolchain"}
 
         passed, total, error = self._run_tests(ctx)
+        from kaiwu.core.test_parser import parse_test_failures
+        structured = parse_test_failures(error) if error else []
         return {"passed": passed, "total": total, "output": error,
-                "error_type": self._classify_error(error)["error_type"] if error else ""}
+                "error_type": self._classify_error(error)["error_type"] if error else "",
+                "structured_failures": structured}
 
     def _check_toolchain(self, lang: str, project_root: str) -> str:
         """检测工具链是否存在。返回错误信息或空字符串。"""
@@ -440,7 +443,7 @@ class VerifierExpert:
             if not has_tests_dir and test_files:
                 # 测试文件在project_root（如 xxx_test.py），直接用文件路径
                 test_paths = " ".join(f'"{f}"' for f in test_files[:10])
-                runners = [("pytest_files", f"python -m pytest {test_paths} --tb=short -q")]
+                runners = [("pytest_files", f"python -m pytest {test_paths} --tb=short -v")]
 
         elif project_lang == "go":
             # Go always has tests if go.mod exists

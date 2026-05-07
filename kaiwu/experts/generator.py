@@ -393,28 +393,32 @@ class GeneratorExpert:
 
         # 注入初始测试失败信息（让LLM第一次就看到具体报错）
         initial_failure = getattr(ctx, 'initial_test_failure', '')
-        if initial_failure and ctx.retry_count == 0:
-            prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
 
-        # 结构化失败信息（精确告诉LLM每个测试为什么失败）
+        # 结构化失败信息（精确告诉LLM每个测试为什么失败）— 首次和重试都注入
         structured = (ctx.verifier_output or {}).get("structured_failures", [])
         if not structured and initial_failure:
             from kaiwu.core.test_parser import parse_test_failures
             structured = parse_test_failures(initial_failure)
         if structured:
             lines = ["## 必须修复的测试失败（精确信息）"]
-            for f in structured[:5]:
+            for f in structured[:8]:
                 name = f.get("test_name", "?")
                 expected = f.get("expected", "")
                 actual = f.get("actual", "")
                 snippet = f.get("snippet", "")
+                err_type = f.get("error_type", "")
                 if expected and actual:
                     lines.append(f"- {name}: 期望 {expected}，实际 {actual}")
+                elif err_type and snippet:
+                    lines.append(f"- {name}: {err_type}: {snippet[:120]}")
                 elif snippet:
-                    lines.append(f"- {name}: {snippet[:100]}")
+                    lines.append(f"- {name}: {snippet[:120]}")
                 else:
                     lines.append(f"- {name}")
             prompt += "\n\n" + "\n".join(lines)
+        elif initial_failure and ctx.retry_count == 0:
+            # fallback: 没解析出结构化信息时给raw output
+            prompt += f"\n\n## 当前测试失败\n{initial_failure[:800]}"
 
         # Inject retry_hint if available
         if ctx.retry_hint:
