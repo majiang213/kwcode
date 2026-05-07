@@ -703,6 +703,8 @@ class PipelineOrchestrator:
         self._persist_reflection(project_root, ctx, gate_result, success=True)
         # 飞轮：策略统计 + 用户模式 + 遥测
         self._record_flywheel(ctx, gate_result, True)
+        # Blueprint收集：记录成功的施工图
+        self._record_blueprints(ctx, project_root)
         # 审计日志
         self._audit.write(ctx, elapsed, True, getattr(self, '_model_name', 'unknown'))
         return {
@@ -1051,6 +1053,26 @@ class PipelineOrchestrator:
             )
         except Exception as e:
             logger.debug("Telemetry failed (non-blocking): %s", e)
+
+    def _record_blueprints(self, ctx: TaskContext, project_root: str):
+        """记录成功任务的Blueprint到飞轮收集器（非阻塞）。"""
+        if not ctx.generator_output:
+            return
+        try:
+            from kaiwu.flywheel.blueprint_collector import BlueprintCollector
+            collector = BlueprintCollector()
+            for patch in ctx.generator_output.get("patches", []):
+                bp = patch.get("blueprint")
+                if bp:
+                    collector.record(
+                        blueprint=bp,
+                        final_code=patch.get("modified", ""),
+                        success=True,
+                        source=patch.get("source", "llm_direct"),
+                        project_root=project_root,
+                    )
+        except Exception as e:
+            logger.debug("Blueprint collector failed (non-blocking): %s", e)
 
     def _build_retry_hint(self, ctx: TaskContext, error_type: str) -> str:
         """按错误类型生成重试提示，注入 Generator prompt。携带上次生成的代码。"""

@@ -27,3 +27,27 @@ lifecycle: mature
 - 确认修复不破坏其他测试
 
 ## 经验规则（自动生成）
+
+## 代码模板
+
+```template:null_check
+def ${function_name}(${args}):
+    if ${check_target} is None:
+        raise ValueError("${check_target} cannot be None")
+    ${original_body}
+```
+
+```template:stub_implement
+def ${function_name}(${args}):
+    """${logic}"""
+    ${original_body}
+```
+
+```template:add_return_guard
+def ${function_name}(${args}):
+    result = None
+    ${original_body}
+    if result is None:
+        return ${default_return}
+    return result
+```

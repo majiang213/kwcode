@@ -197,6 +197,9 @@ class GeneratorExpert:
         self.tools = tool_executor
         self.num_candidates = num_candidates
         self.temperatures = [0.0, 0.3, 0.6][:num_candidates]
+        # Blueprint两步流程
+        self._skill_executor = None  # lazy init（需要project_root）
+        self._blueprint_collector = None
 
     def run(self, ctx: TaskContext) -> Optional[dict]:
         """
@@ -267,7 +270,26 @@ class GeneratorExpert:
                         logger.warning("Could not extract function %s from %s", func_name, fpath)
                         continue
 
-                # Ask LLM to generate only the modified version
+                # ── Step1+2: Blueprint → 模板填充 ──
+                blueprint_result = self._try_blueprint_path(ctx, fpath, original)
+                if blueprint_result:
+                    modified, source, blueprint = blueprint_result
+                    modified = modified.strip("\n")
+                    modified = self._align_indentation(original, modified)
+                    if original not in content:
+                        logger.error("Extracted original not found in file — this should not happen")
+                        continue
+                    patches.append({
+                        "file": fpath,
+                        "original": original,
+                        "modified": modified,
+                        "source": source,
+                        "blueprint": blueprint,
+                    })
+                    explanation_parts.append(f"{fpath}:{func_name}")
+                    continue
+
+                # ── Fallback: 现有LLM直接生成 ──
                 modified = self._generate_modified(
                     ctx, fpath, original, ctx.user_input
                 )
@@ -287,6 +309,8 @@ class GeneratorExpert:
                     "file": fpath,
                     "original": original,
                     "modified": modified,
+                    "source": "llm_direct",
+                    "blueprint": None,
                 })
                 explanation_parts.append(f"{fpath}:{func_name}")
 
@@ -785,3 +809,122 @@ class GeneratorExpert:
         ]
         lower = user_input.lower()
         return any(kw in lower for kw in keywords)
+
+    # ── Blueprint两步流程 ──
+
+    def _ensure_skill_executor(self, project_root: str):
+        """Lazy init SkillExecutor（需要project_root）。"""
+        if self._skill_executor is None:
+            try:
+                from kaiwu.core.skill_executor import SkillExecutor
+                from kaiwu.flywheel.blueprint_collector import BlueprintCollector
+                import os
+                builtin_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), "builtin_experts"
+                )
+                self._skill_executor = SkillExecutor(builtin_dir, project_root)
+                self._blueprint_collector = BlueprintCollector()
+            except Exception as e:
+                logger.debug("SkillExecutor init failed (non-blocking): %s", e)
+                self._skill_executor = None
+                self._blueprint_collector = None
+
+    def _try_blueprint_path(self, ctx: TaskContext, fpath: str,
+                            original: str) -> Optional[tuple[str, str, "Blueprint"]]:
+        """
+        尝试Blueprint两步路径：Step1 LLM生成施工图 → Step2 模板填充。
+        成功返回 (modified_code, source, blueprint)，失败返回None。
+        """
+        self._ensure_skill_executor(ctx.project_root)
+        if not self._skill_executor:
+            return None
+
+        # Step1: LLM生成施工图
+        blueprint = self._generate_blueprint(ctx, fpath, original)
+        if not blueprint:
+            return None
+
+        # Step2: 模板填充
+        from kaiwu.core.skill_executor import SOURCE_LLM_DIRECT
+        code, source = self._skill_executor.execute(blueprint, original)
+        if code and code != original and source != SOURCE_LLM_DIRECT:
+            return code, source, blueprint
+
+        # 模板填充失败，返回None让fallback处理
+        return None
+
+    def _generate_blueprint(self, ctx: TaskContext, fpath: str,
+                            original: str) -> Optional["Blueprint"]:
+        """LLM生成施工图（JSON），健壮解析。"""
+        import json as json_mod
+
+        # upstream约束
+        upstream = ""
+        if ctx.upstream_constraints:
+            upstream = ctx.upstream_constraints[:200]
+
+        prompt = (
+            f"分析以下任务，输出JSON施工图。只输出JSON，不要解释。\n\n"
+            f"任务：{ctx.user_input[:300]}\n"
+            f"文件：{fpath}\n"
+            f"当前函数：\n{original[:400]}\n"
+            f"测试报错：{(getattr(ctx, 'initial_test_failure', '') or '')[:200]}\n"
+            f"跨文件约束：{upstream}\n\n"
+            f'输出格式：\n'
+            f'{{"operation":"一句话描述做什么","logic":"具体逻辑",'
+            f'"pattern":"SKILL模板名或空字符串","requires":["import列表"]}}'
+        )
+
+        try:
+            raw = self.llm.generate(prompt=prompt, system="只输出JSON。", max_tokens=200, temperature=0.0)
+        except Exception:
+            return None
+
+        if not raw:
+            return None
+
+        # 健壮JSON提取：三重fallback
+        json_str = None
+        # 1. 找```json...```块
+        import re as re_mod
+        m = re_mod.search(r'```json\s*(.*?)\s*```', raw, re_mod.DOTALL)
+        if m:
+            json_str = m.group(1)
+        # 2. 找第一个{到最后一个}
+        if not json_str:
+            start = raw.find('{')
+            end = raw.rfind('}')
+            if start != -1 and end > start:
+                json_str = raw[start:end+1]
+        # 3. 都失败
+        if not json_str:
+            return None
+
+        try:
+            data = json_mod.loads(json_str)
+        except (json_mod.JSONDecodeError, ValueError):
+            return None
+
+        # 提取函数名
+        import ast as ast_mod
+        func_name = ""
+        try:
+            tree = ast_mod.parse(original)
+            for node in ast_mod.walk(tree):
+                if isinstance(node, (ast_mod.FunctionDef, ast_mod.AsyncFunctionDef)):
+                    func_name = node.name
+                    break
+        except Exception:
+            pass
+
+        from kaiwu.core.blueprint import Blueprint
+        return Blueprint(
+            target_file=fpath,
+            target_function=func_name,
+            operation=str(data.get("operation", ""))[:200],
+            logic_description=str(data.get("logic", ""))[:500],
+            pattern=str(data.get("pattern", "")),
+            requires=[str(r) for r in data.get("requires", []) if r][:10],
+            constraints=[upstream] if upstream else [],
+            raw_llm_output=raw[:500],
+        )
