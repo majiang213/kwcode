@@ -277,6 +277,11 @@ class VerifierExpert:
         error_info = self._classify_error(test_error) if not passed else {
             "error_type": "", "error_file": "", "error_line": 0,
             "error_message": "", "failed_tests": []}
+
+        # 结构化失败信息（TraceCoder: 精确告诉LLM每个测试为什么失败）
+        from kaiwu.core.test_parser import parse_test_failures
+        structured_failures = parse_test_failures(test_error) if not passed else []
+
         result = {
             "passed": passed,
             "syntax_ok": syntax_ok,
@@ -288,6 +293,7 @@ class VerifierExpert:
             "error_line": error_info["error_line"],
             "error_message": error_info["error_message"],
             "failed_tests": error_info["failed_tests"],
+            "structured_failures": structured_failures,
         }
         ctx.verifier_output = result
         return result

@@ -396,6 +396,26 @@ class GeneratorExpert:
         if initial_failure and ctx.retry_count == 0:
             prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
 
+        # 结构化失败信息（精确告诉LLM每个测试为什么失败）
+        structured = (ctx.verifier_output or {}).get("structured_failures", [])
+        if not structured and initial_failure:
+            from kaiwu.core.test_parser import parse_test_failures
+            structured = parse_test_failures(initial_failure)
+        if structured:
+            lines = ["## 必须修复的测试失败（精确信息）"]
+            for f in structured[:5]:
+                name = f.get("test_name", "?")
+                expected = f.get("expected", "")
+                actual = f.get("actual", "")
+                snippet = f.get("snippet", "")
+                if expected and actual:
+                    lines.append(f"- {name}: 期望 {expected}，实际 {actual}")
+                elif snippet:
+                    lines.append(f"- {name}: {snippet[:100]}")
+                else:
+                    lines.append(f"- {name}")
+            prompt += "\n\n" + "\n".join(lines)
+
         # Inject retry_hint if available
         if ctx.retry_hint:
             prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
