@@ -587,37 +587,6 @@ def skill_discard():
         console.print("  [dim]暂无待丢弃的草稿[/dim]")
 
 
-@skill_app.command("list-templates")
-def skill_list_templates():
-    """列出所有可用的SKILL.md模板。"""
-    from kaiwu.core.skill_executor import SkillExecutor
-    executor = SkillExecutor("kaiwu/builtin_experts", ".")
-    templates = executor.list_templates()
-    if not templates:
-        console.print("  [dim]暂无模板。使用kwcode完成任务后自动积累。[/dim]")
-        return
-    console.print(f"  [bold]可用模板（{len(templates)}个）：[/bold]")
-    for t in templates:
-        console.print(f"    • {t}")
-
-
-@skill_app.command("promote")
-def skill_promote():
-    """将高频llm_direct成功案例提炼为模板候选。"""
-    from kaiwu.flywheel.blueprint_collector import BlueprintCollector
-    collector = BlueprintCollector()
-    candidates = collector.get_llm_direct_candidates(min_count=3)
-    if not candidates:
-        console.print("  [dim]暂无候选（需要3次以上相同operation的成功案例）[/dim]")
-        return
-    console.print(f"  [bold]发现{len(candidates)}个模板候选：[/bold]")
-    for c in candidates:
-        console.print(f"\n    operation: {c.get('operation', '')}")
-        console.print(f"    logic: {c.get('logic', '')}")
-        code = c.get('final_code', '')[:200]
-        console.print(f"    示例代码：\n{code}")
-
-
 def maybe_show_weekly_stats(console):
     """Show weekly stats hint at startup (once per 7 days). P2-FLEX-3: skip if <5 tasks."""
     import time as _time
