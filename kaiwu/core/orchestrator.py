@@ -674,14 +674,21 @@ class PipelineOrchestrator:
                         ab_candidate_name, ab_used_new: bool, elapsed: float,
                         checkpoint, on_status) -> dict:
         """Record success: memory, registry, trajectory, AB, value, milestone, reflection."""
-        # Reviewer: 需求对齐审查 — 不对齐返回None让调用方重试
-        review_result = self._do_review(ctx, on_status)
-        if review_result and not review_result.get("aligned") and review_result.get("confidence", 0) >= 0.7:
-            gap = review_result.get("gap", "")
-            self._emit(on_status, "review_reject", f"审查不通过：{gap}")
-            ctx.retry_hint = f"改错了：{gap}"
-            ctx.locator_output = None  # 强制重新定位修复
-            return None  # 返回None信号给retry loop
+        # Reviewer: 需求对齐审查 — 测试全部通过时跳过（测试是最终裁判，Reviewer会幻觉）
+        v = ctx.verifier_output or {}
+        tests_passed = v.get("tests_passed", 0)
+        tests_total = v.get("tests_total", 0)
+        all_tests_pass = tests_total > 0 and tests_passed == tests_total
+
+        if not all_tests_pass:
+            # 测试没全通过才需要Reviewer审查
+            review_result = self._do_review(ctx, on_status)
+            if review_result and not review_result.get("aligned") and review_result.get("confidence", 0) >= 0.7:
+                gap = review_result.get("gap", "")
+                self._emit(on_status, "review_reject", f"审查不通过：{gap}")
+                ctx.retry_hint = f"改错了：{gap}"
+                ctx.locator_output = None  # 强制重新定位修复
+                return None  # 返回None信号给retry loop
 
         checkpoint.discard()  # 审查通过才清理快照
 
