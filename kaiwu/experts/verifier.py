@@ -163,7 +163,17 @@ class VerifierExpert:
             original = patch.get("original", "")
             modified = patch.get("modified", "")
 
-            if original and modified:
+            # whole_file模式：直接写入整个文件
+            if patch.get("write_mode") == "whole_file":
+                try:
+                    os.makedirs(os.path.dirname(fpath) if os.path.dirname(fpath) else ".", exist_ok=True)
+                    with open(fpath, "w", encoding="utf-8") as f:
+                        f.write(modified)
+                    success = True
+                except Exception as e:
+                    logger.error("whole_file write failed for %s: %s", fpath, e)
+                    success = False
+            elif original and modified:
                 success = self.tools.apply_patch(fpath, original, modified)
             elif modified:
                 success = self.tools.write_file(fpath, modified)
@@ -239,6 +249,29 @@ class VerifierExpert:
 
         if not passed:
             self._rollback(backups)
+            # WRONG_FILE确定性检测
+            if self._detect_wrong_file(ctx, test_error):
+                error_info = {
+                    "error_type": "wrong_file",
+                    "error_file": "",
+                    "error_line": 0,
+                    "error_message": "修改的文件与报错文件不匹配",
+                    "failed_tests": [],
+                }
+                result = {
+                    "passed": False,
+                    "syntax_ok": syntax_ok,
+                    "tests_passed": tests_passed,
+                    "tests_total": tests_total,
+                    "error_detail": test_error,
+                    "error_type": "wrong_file",
+                    "error_file": "",
+                    "error_line": 0,
+                    "error_message": "修改的文件与报错文件不匹配",
+                    "failed_tests": [],
+                }
+                ctx.verifier_output = result
+                return result
 
         error_info = self._classify_error(test_error) if not passed else {
             "error_type": "", "error_file": "", "error_line": 0,
@@ -599,3 +632,48 @@ class VerifierExpert:
         for fpath, content in backups.items():
             self.tools.write_file(fpath, content)
             logger.info("Rolled back %s", fpath)
+
+    def _detect_wrong_file(self, ctx: TaskContext, test_output: str) -> bool:
+        """
+        确定性检测：是否改了错误的文件。
+        条件：测试失败 + 测试报错里提到的文件 ≠ 我们修改的文件
+        """
+        if not ctx.generator_output:
+            return False
+
+        modified_files = {
+            os.path.basename(p["file"])
+            for p in ctx.generator_output.get("patches", [])
+            if p.get("file")
+        }
+
+        if not modified_files:
+            return False
+
+        # 从测试输出提取出错的文件
+        error_files = set()
+        # Python: File "xxx.py", line N
+        error_files.update(
+            os.path.basename(f) for f in re.findall(r'File "([^"]+\.py)"', test_output)
+        )
+        # Go: file.go:42:
+        error_files.update(
+            os.path.basename(f) for f in re.findall(r'(\S+\.go):\d+:', test_output)
+        )
+        # TS/JS: file.ts(42,5):
+        error_files.update(
+            os.path.basename(f) for f in re.findall(r'(\S+\.(?:ts|js|tsx|jsx))[:(]\d+', test_output)
+        )
+
+        # 过滤测试文件和标准库
+        error_files = {
+            f for f in error_files
+            if not f.startswith('test_') and '_test.' not in f
+            and 'site-packages' not in f
+        }
+
+        if not error_files:
+            return False
+
+        # 出错文件和修改文件没有交集 → 可能改错了
+        return error_files.isdisjoint(modified_files)

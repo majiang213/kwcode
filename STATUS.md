@@ -7,12 +7,89 @@
 
 ---
 
-## Current: v1.5.1 (2026-05-06)
+## Current: v1.6.0 (2026-05-07)
 
-501/501 tests green + 67个bench tasks。
-三飞轮 + 匿名遥测 + Hashline + AdaptThink + Fast/Slow + 审计日志 + model命令 + model_capability全接入 + ctx自适应 + prompt量化 + Test-First Loop + 工具链自动安装。
+514/514 tests green + 67个bench tasks + 63个专项诊断测试。
+MoE确定性架构改造：GapDetector + ExecutionStateTracker + EnvProber + 增强审计日志。
+Generator根据gap.scope动态解除函数限制（存根任务不再cap at 2）。
 
-### v1.5.1 — Flywheel + Anonymous Telemetry
+### v1.6.0 — MoE Deterministic Architecture
+
+**核心原则：LLM只做代码生成，所有路由/决策/状态判断全部确定性化。**
+
+**架构现状与下一步：**
+- 当前：GapType枚举 + WholeFileImplExpert/DependencyFixExpert（按业务场景的专家类，冗余）
+- Generator已能根据ctx.gap自动解除函数限制（正确路径已实现）
+- 下一步：收敛到ExpertDirective模式——删除业务专家类，GapDetector输出scope指令，Generator统一处理所有scope（whole_file/single_function/env_setup），新场景只更新SKILL.md不加Python类
+
+**GapDetector** (`core/gap_detector.py`)
+- GapType enum（11种）：NONE/NOT_IMPLEMENTED/STUB_RETURNS_NONE/LOGIC_ERROR/MISSING_DEP/SYNTAX_STRUCTURAL/MISSING_TOOLCHAIN/WRONG_FILE/NO_TEST/ENVIRONMENT/UNKNOWN
+- Gap dataclass：gap_type + confidence + files + functions + error_msg + suggestion
+- GapDetector.compute()：纯正则匹配，零LLM调用，按优先级分类
+- GAP_TO_EXPERT_TYPE：确定性映射 GapType → expert_type
+
+**ExecutionStateTracker** (`core/execution_state.py`)
+- TestDelta dataclass：每次修改后的测试状态变化
+- set_baseline() → record() → has_regression() → get_best_partial_state()
+- Git bisect式定位：知道哪步引入了问题，不盲目reset
+- 代码状态回滚交给Checkpoint，本类只追踪测试状态
+
+**EnvProber** (`core/env_prober.py`)
+- 任务开始前确定性探测并修复环境（工具链+依赖+rig.json预构建）
+- LANG_TOOLCHAIN dict：6种语言的check/install/dep_cmd/dep_file
+- 缓存.kaiwu/env_profile.json（24h TTL，只缓存成功）
+- _find_working_test_cmd()：go用build验证（spec v2修正）
+
+**WholeFileImplExpert** (`experts/whole_file_impl.py`)
+- 处理存根实现任务（pass/raise NotImplementedError → 真实实现）
+- can_handle()：gap为NOT_IMPLEMENTED/STUB_RETURNS_NONE时True
+- AST提取所有pass存根，LLM生成完整文件（max_tokens=4096）
+- write_mode="whole_file"：直接写入整个文件
+
+**DependencyFixExpert** (`experts/dependency_fix.py`)
+- 确定性依赖安装，零LLM调用
+- 只匹配`No module named 'xxx'`（v2修正：不匹配from 'yyy'）
+- PyPI名映射（cv2→opencv-python, PIL→Pillow等）
+- 返回env_changed标记，orchestrator重新计算gap
+
+**Gate重构** (`core/gate.py`)
+- 确定性优先路由，LLM只做最后兜底二分类
+- 优先级：特殊任务关键词 → Gap路由(conf>=0.7) → 关键词匹配 → LLM兜底
+- _resolve_intent_vs_gap()：三层置信度消解（>=0.85 gap wins / 0.5-0.85 intersection / <0.5 user wins）
+- routing_source字段：记录每次路由决策来源
+
+**Orchestrator重构** (`core/orchestrator.py`)
+- Phase 0：EnvProber.probe_and_fix()（确定性环境修复）
+- Phase 1：无条件pre_test → GapDetector → ExecutionStateTracker.set_baseline()
+- Phase 2：Gap驱动expert_type覆盖（确定性优先于LLM分类）
+- Retry loop增强：回归检测→checkpoint.restore() / env_changed→_recompute_gap()
+- _select_moe_expert()：确定性选择WholeFileImpl/DependencyFix
+
+**Verifier增强** (`experts/verifier.py`)
+- whole_file write_mode支持（直接写入整个文件）
+- _detect_wrong_file()：确定性检测修改文件与报错文件不匹配
+
+**审计日志增强** (`audit/logger.py`)
+- 目录分离：成功→~/.kaiwu/logs/success/ / 失败→~/.kaiwu/logs/failed/
+- 新增字段：routing_source, initial_gap_type, iterations[]
+- log_iteration()：每轮retry记录gap_type/expert_selected/can_handle_results/transition_reason/test_delta
+- 向后兼容：list_logs()/show_log()同时扫描新旧目录
+
+**TestParser** (`core/test_parser.py`)
+- extract_failing_tests() / extract_passing_tests()
+- 纯正则，支持pytest/go/jest/rust四种格式
+- 供GapDetector、ExecutionStateTracker、Orchestrator共用
+
+**TaskContext新增字段** (`core/context.py`)
+- gap: Gap dataclass instance
+- confirmed_test_cmd: EnvProber提供的已验证测试命令
+- routing_source: 路由来源审计字段
+
+**专项诊断测试** (`tests/diagnostic/`, 63个测试)
+- test_gap_detector_accuracy.py：20个手工样本，GapType分类准确率>90%
+- test_stub_ratio_threshold.py：10+10文件，路由准确率>85%
+- test_execution_tracker_value.py：5个多迭代场景，回归检测+最优中间状态
+- test_routing_layer_stats.py：三层消噪触发率验证，gap_detector>llm_fallback
 
 **三飞轮系统（全部本地）**
 - `flywheel/strategy_stats.py` — 错误策略有效性统计（~/.kwcode/strategy_stats.json）
@@ -279,7 +356,8 @@ Theory: RIG + FastCode + CodeCompass
 | Multi-language | 51 | PASS |
 | Server/TUI | 16 | PASS |
 | SearchSubagent+Manifest | 27 | PASS |
-| **Total** | **451** | **All green** |
+| MoE Diagnostic | 63 | PASS |
+| **Total** | **514** | **All green** |
 
 ---
 
@@ -304,9 +382,13 @@ kwcode/
     │   ├── event_bus.py         # Unified event bus (append-only + replay)
     │   ├── cognitive_gate.py    # Diminishing returns detection
     │   ├── wink.py              # Self-repair monitor
-    │   ├── gate.py              # LLM task classification → expert routing
-    │   ├── orchestrator.py      # Deterministic pipeline + error strategy routing
-    │   ├── context.py           # TaskContext dataclass
+    │   ├── gate.py              # [v1.6] 确定性优先路由（Gap→关键词→LLM兜底）
+    │   ├── orchestrator.py      # [v1.6] MoE pipeline + Gap驱动 + 回归检测
+    │   ├── context.py           # TaskContext dataclass (+gap/confirmed_test_cmd/routing_source)
+    │   ├── gap_detector.py      # [v1.6] GapType enum + GapDetector.compute() (zero LLM)
+    │   ├── execution_state.py   # [v1.6] ExecutionStateTracker (regression detection)
+    │   ├── env_prober.py        # [v1.6] EnvProber (toolchain/dep auto-fix, cached)
+    │   ├── test_parser.py       # [v1.6] extract_failing/passing_tests (regex)
     │   ├── task_compiler.py     # DAG scheduler + WorktreeManager
     │   ├── upstream_manifest.py # [v1.5] Cross-file contract tracking (zero LLM)
     │   ├── planner.py           # /plan mode + risk assessment
@@ -320,7 +402,9 @@ kwcode/
     │   ├── locator.py           # BM25+graph location + DocReader + Prefetch
     │   ├── search_subagent.py   # [v1.5] Isolated search (independent context)
     │   ├── generator.py         # Code generation (original from file, LLM writes modified)
-    │   ├── verifier.py          # Syntax + pytest + cross-file contract check
+    │   ├── verifier.py          # [v1.6] Syntax + pytest + whole_file + _detect_wrong_file
+    │   ├── whole_file_impl.py   # [v1.6] Stub implementation (pass→real, write_mode=whole_file)
+    │   ├── dependency_fix.py    # [v1.6] Deterministic dep install (zero LLM)
     │   ├── search_augmentor.py  # Search augmentation + BM25 rerank
     │   ├── consistency_checker.py # Frontend/backend API consistency (deterministic)
     │   ├── chat_expert.py       # Chat (search gating)
@@ -338,7 +422,9 @@ kwcode/
     ├── mcp/                     # MCP Router
     ├── llm/                     # Ollama + llama.cpp backends
     ├── tools/                   # 5 deterministic tools + ToolGateway
-    └── tests/                   # 451 unit tests + 67 bench tasks (Python/Go/TS)
+    ├── audit/                   # [v1.6] Enhanced audit (success/failed split, iterations)
+    └── tests/                   # 514 unit tests + 67 bench tasks + 63 diagnostic
+        └── diagnostic/          # [v1.6] 4 architecture validation test suites
 ```
 
 ---

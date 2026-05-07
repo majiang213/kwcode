@@ -17,6 +17,10 @@ from kaiwu.core.context import TaskContext
 from kaiwu.core.event_bus import EventBus
 from kaiwu.core.cognitive_gate import CognitiveGate
 from kaiwu.core.wink import WinkMonitor
+from kaiwu.core.gap_detector import GapDetector, GapType, Gap, GAP_TO_EXPERT_TYPE
+from kaiwu.core.execution_state import ExecutionStateTracker
+from kaiwu.core.env_prober import EnvProber
+from kaiwu.core.test_parser import extract_failing_tests, extract_passing_tests
 from kaiwu.experts.locator import LocatorExpert
 from kaiwu.experts.generator import GeneratorExpert
 from kaiwu.experts.verifier import VerifierExpert
@@ -24,6 +28,8 @@ from kaiwu.experts.search_augmentor import SearchAugmentorExpert
 from kaiwu.experts.search_subagent import SearchSubagent
 from kaiwu.experts.office_handler import OfficeHandlerExpert
 from kaiwu.experts.chat_expert import ChatExpert
+from kaiwu.experts.whole_file_impl import WholeFileImplExpert
+from kaiwu.experts.dependency_fix import DependencyFixExpert
 from kaiwu.memory.kaiwu_md import KaiwuMemory
 from kaiwu.registry.expert_registry import ExpertRegistry
 from kaiwu.tools.executor import ToolExecutor
@@ -150,6 +156,16 @@ class PipelineOrchestrator:
         self._cognitive_gate = CognitiveGate()
         self._search_subagent = SearchSubagent(locator, tool_executor)
         self._manifest = UpstreamManifest()
+        # MoE新增：确定性基础设施
+        self._gap_detector = GapDetector()
+        self._state_tracker = ExecutionStateTracker()
+        self._env_prober = EnvProber()
+        try:
+            _llm = getattr(generator, 'llm', None)
+            self._whole_file_impl = WholeFileImplExpert(llm=_llm, tool_executor=tool_executor) if _llm else None
+        except Exception:
+            self._whole_file_impl = None
+        self._dep_fix = DependencyFixExpert(tool_executor=tool_executor)
 
     def run(
         self,
@@ -245,6 +261,60 @@ class PipelineOrchestrator:
         if simple_result is not None:
             return simple_result
 
+        # ══════════════════════════════════════
+        # Phase 0：环境探针（确定性，不走LLM）
+        # ══════════════════════════════════════
+        self._emit(on_status, "env_probe", "检测项目环境...")
+        try:
+            env_result = self._env_prober.probe_and_fix(project_root, self.tools)
+            if env_result.get("installed"):
+                self._emit(on_status, "env_setup",
+                           f"已安装：{', '.join(env_result['installed'])}")
+            if env_result.get("test_cmd"):
+                ctx.confirmed_test_cmd = env_result["test_cmd"]
+        except Exception as e:
+            logger.debug("EnvProber failed (non-blocking): %s", e)
+
+        # ══════════════════════════════════════
+        # Phase 1：前置测试 + GapDetector（无条件，非chat/vision/office）
+        # ══════════════════════════════════════
+        self._state_tracker.reset()
+        if expert_type not in ("chat", "vision", "office"):
+            try:
+                self._emit(on_status, "pre_test", "运行初始测试获取基线...")
+                pre_result = self.verifier.run_tests_only(ctx)
+                pre_output = pre_result.get("output", "")
+                if pre_output:
+                    ctx.initial_test_failure = pre_output
+
+                # GapDetector计算初始Gap（驱动后续所有决策）
+                ctx.gap = self._gap_detector.compute(pre_output, project_root)
+
+                # 状态追踪器设置基线
+                failing_tests = extract_failing_tests(pre_output)
+                self._state_tracker.set_baseline(failing_tests)
+
+                self._emit(on_status, "pre_test_done",
+                           f"初始Gap：{ctx.gap.gap_type.value}（置信度{ctx.gap.confidence:.0%}）")
+
+                # Gap驱动的expert_type覆盖（确定性优先于LLM分类）
+                if ctx.gap.gap_type != GapType.UNKNOWN and ctx.gap.confidence >= 0.7:
+                    gap_expert = GAP_TO_EXPERT_TYPE.get(ctx.gap.gap_type)
+                    if gap_expert and gap_expert != expert_type:
+                        self._emit(on_status, "gap_override",
+                                   f"Gap路由覆盖：{expert_type} → {gap_expert}")
+                        expert_type = gap_expert
+                        gate_result = {**gate_result, "expert_type": expert_type}
+                        ctx.routing_source = "gap_detector"
+                    else:
+                        ctx.routing_source = gate_result.get("routing_source", "keyword")
+                else:
+                    ctx.routing_source = gate_result.get("routing_source", "keyword")
+
+            except Exception as e:
+                logger.debug("Pre-test/GapDetector failed (non-blocking): %s", e)
+                ctx.routing_source = gate_result.get("routing_source", "keyword")
+
         # Gate 3: AB测试
         ab_candidate_name, ab_used_new, gate_result = self._setup_ab_test(gate_result, expert_type, on_status)
 
@@ -254,25 +324,14 @@ class PipelineOrchestrator:
         else:
             sequence = EXPERT_SEQUENCES.get(expert_type, ["generator", "verifier"])
 
-        self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')}")
+        self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')} | 路由：{ctx.routing_source}")
 
-        # ── Test-First Loop：先跑测试拿失败输出，精准定位 ──
-        if expert_type in ("locator_repair", "refactor") and "locator" in sequence:
-            try:
-                self._emit(on_status, "pre_test", "先运行测试获取报错...")
-                pre_result = self.verifier.run_tests_only(ctx)
-                if pre_result.get("output"):
-                    ctx.initial_test_failure = pre_result["output"]
-                    self._emit(on_status, "pre_test_done",
-                               f"测试 {pre_result['passed']}/{pre_result['total']}，"
-                               f"定位信号已获取")
-                elif pre_result.get("error_type") == "missing_toolchain":
-                    self._emit(on_status, "toolchain", pre_result["output"][:100])
-            except Exception as e:
-                logger.debug("Pre-test failed (non-blocking): %s", e)
+        # ── MoE专家选择：whole_file_impl / dependency_fix 直接路由 ──
+        moe_expert = self._select_moe_expert(ctx, expert_type)
 
-        # 经验回放 + 预搜索 + 计划生成
-        self._prepare_context(ctx, gate_result, expert_type, user_input, project_root, no_search, on_status)
+        # 经验回放 + 预搜索 + 计划生成（跳过已被MoE专家处理的场景）
+        if not moe_expert:
+            self._prepare_context(ctx, gate_result, expert_type, user_input, project_root, no_search, on_status)
 
         # 检查点：执行前快照（多任务时跳过，避免竞态）
         checkpoint = Checkpoint(project_root)
@@ -448,6 +507,35 @@ class PipelineOrchestrator:
                 except Exception as e:
                     logger.debug("Search failed (网络保护，不阻塞): %s", e)
                     ctx.search_triggered = True  # 失败也标记，避免循环重试搜索
+
+            # ── ExecutionStateTracker：记录测试状态变化 ──
+            if ctx.verifier_output:
+                test_output = ctx.verifier_output.get("error_detail", "")
+                current_failing = extract_failing_tests(test_output)
+                current_passing = extract_passing_tests(test_output)
+                new_gap = self._gap_detector.compute(test_output, project_root)
+                self._state_tracker.record(
+                    attempt=ctx.retry_count,
+                    current_failing=current_failing,
+                    current_passing=current_passing,
+                    gap_type=new_gap.gap_type.value,
+                )
+
+                # 回归检测：新引入的失败 → 回滚
+                if self._state_tracker.has_regression():
+                    self._emit(on_status, "regression_detected",
+                               f"第{ctx.retry_count}次修改引入了回归，回滚...")
+                    if checkpoint_saved:
+                        checkpoint.restore()
+                    ctx.retry_hint = "上次修改引入了回归，请只修改必要的部分"
+
+                # 更新gap驱动下一轮
+                ctx.gap = new_gap
+
+            # env_changed处理（DependencyFixExpert返回）
+            if ctx.generator_output and ctx.generator_output.get("env_changed"):
+                ctx.gap = self._recompute_gap(ctx, project_root)
+                self._emit(on_status, "env_changed", "环境已变化，重新分析...")
 
             # Reset expert outputs for retry (RED-3: fresh context each attempt)
             ctx.locator_output = None
@@ -1027,3 +1115,41 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.debug("Import fixer failed (non-blocking): %s", e)
             return False
+
+    def _select_moe_expert(self, ctx: TaskContext, expert_type: str):
+        """
+        MoE专家选择：根据gap确定性选择专门专家。
+        返回专家实例或None（走默认pipeline）。
+
+        注意：WholeFileImplExpert不再作为独立路径——
+        而是通过ctx.gap传递scope信息给Generator，
+        Generator根据gap_type动态解除函数数量限制。
+        DependencyFixExpert仍作为独立路径（不需要LLM）。
+        """
+        if not ctx.gap:
+            return None
+
+        # DependencyFixExpert：纯确定性安装，不需要LLM
+        can, conf = self._dep_fix.can_handle(ctx)
+        if can:
+            return self._dep_fix
+
+        # WholeFileImplExpert：只在Generator不可用时才走独立路径
+        # 正常情况下，Generator通过ctx.gap自动解除函数限制
+        if self._whole_file_impl and expert_type == "whole_file_impl":
+            can, conf = self._whole_file_impl.can_handle(ctx)
+            if can:
+                return self._whole_file_impl
+
+        return None
+
+    def _recompute_gap(self, ctx: TaskContext, project_root: str) -> Gap:
+        """重新运行测试并计算当前gap，用于环境变化后更新状态。"""
+        try:
+            test_result = self.verifier.run_tests_only(ctx)
+            return self._gap_detector.compute(
+                test_result.get("output", ""),
+                project_root
+            )
+        except Exception:
+            return ctx.gap or Gap(GapType.UNKNOWN, 0.3, [], [], "", "")

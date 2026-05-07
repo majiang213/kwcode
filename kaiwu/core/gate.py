@@ -1,15 +1,17 @@
 """
-Gate: single LLM call, structured JSON output, routes to expert pipeline.
-RED-1: Must output structured JSON, no string parsing.
-v0.4.3: LLM通用分类为主，专家知识叠加（不替代）。
+Gate: 确定性优先路由，LLM只做最后兜底。
+决策优先级：特殊任务快速路由 → 测试gap路由 → 文件特征检测 → 关键词匹配 → LLM兜底二分类。
 """
 
+import ast
+import glob
 import json
 import logging
+import os
 from typing import Optional, TYPE_CHECKING
 
 from kaiwu.llm.llama_backend import LLMBackend
-from kaiwu.core.orchestrator import EXPERT_SEQUENCES
+from kaiwu.core.gap_detector import GapType, Gap, GAP_TO_EXPERT_TYPE
 
 if TYPE_CHECKING:
     from kaiwu.registry.expert_registry import ExpertRegistry
@@ -18,77 +20,31 @@ logger = logging.getLogger(__name__)
 
 __all__ = ["Gate"]
 
+# 保留原有EXPERT_SEQUENCES引用（orchestrator定义）
+from kaiwu.core.orchestrator import EXPERT_SEQUENCES
+
 GATE_SYSTEM = "你是任务分类器。只返回JSON，不要有其他内容。"
 
+# 保留GATE_PROMPT供向后兼容（旧测试引用）
 GATE_PROMPT = """分析用户输入，返回分类JSON。
 
 重要：如果项目存在.kaiwu/rig.json（仓库结构索引），你应该优先参考它来理解项目的文件结构、API路由和前后端对应关系，以便更准确地分类任务和拆分子任务。
 
-expert_type选项：
-- locator_repair：修复bug、修改已有代码（用户明确提到已有文件路径如src/xxx.py）
-- codegen：从零创建全新文件或全新项目（"写一个"、"生成"、"创建"开头的代码任务）
-- refactor：重构、优化、整理已有代码结构（用户明确提到已有文件+重构/拆分/提取）
-- doc：写注释、文档、README（仅限代码相关文档，用户明确提到已有文件+docstring/注释）
-- office：仅限生成Excel(.xlsx)/Word(.docx)/PPT(.pptx)办公文档，不包括代码文件
-- chat：问候、闲聊、非编码问题、询问天气、询问知识
-- vision：图片分析、图片代码生成、UI截图分析、设计图实现（用户上传了图片或提到图片相关内容）
-
-difficulty选项：easy | hard
-  hard条件（满足任意一条）：
-  - 明确涉及多个不同类型的操作（如"找bug AND 生成网页 AND 搜索数据"）
-  - 涉及文件数估计 > 3个
-  - 需要先获取外部信息才能生成代码
-
-needs_search选项：true | false
-  true条件：任务需要实时数据（天气/股价/当前时间/最新版本）或需要查询API文档/库文档
-
-subtask_hint：仅difficulty=hard时填写，逗号分隔的子任务简述。不建议拆分时留空字符串。
-
-关键区分规则：
-- office仅用于生成.pptx/.xlsx/.docx办公文档文件，HTML/网页展示不算office
-- "生成PPT"/"做个幻灯片"/"演示文稿"/"汇报PPT" → office
-- "写个展示PPT内容的HTML页面"/"用HTML做演示" → codegen（不是office！）
-- 代码文件(.py/.js/.html/.css/.json/.go/.ts/.sh)一律不选office
-- "写一个xxx.py/html/js/css/json/go/ts/sh" → codegen（不是office！）
-- "修复src/xxx.py" → locator_repair
-- "重构src/xxx.py" → refactor
-- 不确定时优先选codegen或locator_repair，不要选office
-- 图片相关任务（上传图片、分析截图、根据设计图生成代码） → vision
-
-示例：
-- "你好" → {{"expert_type":"chat","task_summary":"问候","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "帮我修复登录bug" → {{"expert_type":"locator_repair","task_summary":"修复登录","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "搜索南京天气做网页" → {{"expert_type":"codegen","task_summary":"天气网页","difficulty":"hard","needs_search":true,"subtask_hint":"搜索天气数据,生成展示网页"}}
-- "重构认证模块" → {{"expert_type":"refactor","task_summary":"重构认证","difficulty":"hard","needs_search":false,"subtask_hint":""}}
-- "生成一个Excel报表" → {{"expert_type":"office","task_summary":"Excel报表","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "根据内容生成项目介绍PPT" → {{"expert_type":"office","task_summary":"项目PPT","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "做个幻灯片汇报" → {{"expert_type":"office","task_summary":"汇报PPT","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "分析这张截图" → {{"expert_type":"vision","task_summary":"图片分析","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-- "根据UI设计图生成HTML代码" → {{"expert_type":"vision","task_summary":"UI代码生成","difficulty":"easy","needs_search":false,"subtask_hint":""}}
-
-格式：{{"expert_type":"...","task_summary":"10字内","difficulty":"...","needs_search":false,"subtask_hint":""}}
-
+expert_type选项：locator_repair/codegen/refactor/doc/office/chat/vision
 用户输入：{user_input}"""
 
-# JSON grammar constraint for llama.cpp
-GATE_GRAMMAR = r'''
-root   ::= "{" ws expert-type "," ws task-summary "," ws difficulty "}" ws
-expert-type ::= "\"expert_type\"" ws ":" ws "\"" expert-val "\""
-expert-val ::= "locator_repair" | "codegen" | "refactor" | "doc" | "office" | "chat" | "vision"
-task-summary ::= "\"task_summary\"" ws ":" ws string
-difficulty ::= "\"difficulty\"" ws ":" ws ("\"easy\"" | "\"hard\"")
-string ::= "\"" [^"]* "\""
-ws ::= [ \t\n]*
-'''
+GATE_PROMPT_MINIMAL = """判断这个任务是"新建文件"还是"修改文件"，只输出一个JSON：
+{{"action": "create"}} 或 {{"action": "modify"}}
 
-VALID_EXPERT_TYPES = {"locator_repair", "codegen", "refactor", "doc", "office", "chat", "vision"}
-VALID_DIFFICULTIES = {"easy", "hard"}
+任务：{user_input}"""
+
+VALID_EXPERT_TYPES = {"locator_repair", "codegen", "refactor", "doc", "office",
+                      "chat", "vision", "whole_file_impl", "dependency_fix"}
 
 
 class Gate:
-    """Task classifier. Expert registry first, LLM fallback."""
+    """确定性优先路由，LLM只做最后兜底二分类。"""
 
-    # Map expert pipeline to existing expert_type for orchestrator compatibility
     _PIPELINE_TO_TYPE = {
         ("locator", "generator", "verifier"): "locator_repair",
         ("generator", "verifier"): "codegen",
@@ -99,123 +55,291 @@ class Gate:
         ("vision",): "vision",
     }
 
-    def __init__(self, llm: LLMBackend, use_grammar: bool = False, registry: "ExpertRegistry | None" = None):
+    def __init__(self, llm: LLMBackend, use_grammar: bool = False,
+                 registry: "ExpertRegistry | None" = None):
         self.llm = llm
         self.use_grammar = use_grammar
         self.registry = registry
 
-    def classify(self, user_input: str, memory_context: str = "") -> dict:
+    def classify(self, user_input: str, memory_context: str = "",
+                 gap: Optional[Gap] = None) -> dict:
         """
-        Classify user input: LLM通用分类为主，专家知识为辅（叠加模式）。
-        1. LLM通用分类 → expert_type (codegen/locator_repair/refactor/doc/chat)
-        2. 专家关键词匹配 → 叠加领域知识(system_prompt)，不替代通用分类
+        确定性优先路由。优先级从高到低：
+        1. 特殊任务快速路由（确定性关键词）
+        2. 测试gap路由（confidence >= 0.7）
+        3. 文件特征检测（AST确定性）
+        4. 关键词匹配
+        5. LLM兜底（只做二分类）
         """
-        # ── Step 1: LLM通用分类（始终执行，作为主分类结果）──
-        prompt = GATE_PROMPT.format(user_input=user_input)
-        if memory_context:
-            prompt = f"项目记忆：\n{memory_context}\n\n{prompt}"
-
-        grammar = GATE_GRAMMAR if self.use_grammar else None
-
-        raw = self.llm.generate(
-            prompt=prompt,
-            system=GATE_SYSTEM,
-            max_tokens=150,
-            temperature=0.01,
-            stop=["\n\n"],
-            grammar_str=grammar,
-        )
-
-        result = self._parse(raw, user_input)
-        result = self._postprocess(result, user_input)
-
-        # ── Step 2: 专家关键词匹配（叠加模式，不替代通用分类）──
-        result["expert_name"] = None
-        result["route_type"] = "general"
-
-        if self.registry:
-            match = self.registry.match(user_input)
-            if match:
-                expert = match["expert"]
-                expert_pipeline = tuple(expert["pipeline"])
-                general_pipeline = tuple(
-                    EXPERT_SEQUENCES.get(result["expert_type"], ["generator", "verifier"])
-                )
-
-                # 专家pipeline和通用分类一致 → 用专家（加载system_prompt）
-                # 不一致 → 以通用分类为准，专家system_prompt作为附加知识注入
-                result["expert_name"] = match["name"]
-                result["confidence"] = match["confidence"]
-                # Progressive disclosure: use instructions (SKILL.md) or system_prompt (YAML)
-                result["system_prompt"] = expert.get("instructions") or expert.get("system_prompt", "")
-
-                if expert_pipeline == general_pipeline:
-                    # 完全一致：走专家路由
-                    result["route_type"] = "expert_registry"
-                    result["pipeline"] = list(expert_pipeline)
-                else:
-                    # 不一致：通用分类为主，专家知识为辅
-                    result["route_type"] = "general_with_expert"
-                    # 不覆盖pipeline，让orchestrator用通用的EXPERT_SEQUENCES
-
-        # Inject confidence if not already set by expert registry
-        if "confidence" not in result:
-            result["confidence"] = self._estimate_confidence(result, user_input)
-
-        return result
-
-    @staticmethod
-    def _postprocess(result: dict, user_input: str) -> dict:
-        """最后一道防线：仅纠正office误分类。不替代模型分类能力。"""
-        et = result.get("expert_type", "chat")
         lower = user_input.lower()
 
-        # CLI image commands append explicit markers before classification.
-        # Treat those as authoritative so image tasks do not fall through to chat/codegen
-        # when the model ignores a path-only hint.
+        # ══════════════════════════════════════
+        # 优先级1：特殊任务快速路由（确定性关键词）
+        # ══════════════════════════════════════
+
+        # vision: 图片相关
         if "[图片:" in user_input or "[image:" in lower:
-            result["expert_type"] = "vision"
-            result.setdefault("needs_search", False)
-            result.setdefault("subtask_hint", "")
-            return result
+            return self._quick_route("vision", user_input, "keyword")
 
-        # office仅限Excel/Word/PPT办公文档，代码任务不应走office
-        if et == "office":
-            # 只有明确提到办公文档格式才保留office
-            _OFFICE_FORMATS = (
-                ".xlsx", ".docx", ".pptx",
-                "excel", "word文档", "ppt", "幻灯片", "演示文稿", "汇报",
+        # chat: 问候/闲聊/非编码
+        chat_signals = ["你好", "hello", "hi", "什么是", "解释一下", "为什么",
+                        "怎么理解", "帮我理解", "告诉我"]
+        if any(s in lower for s in chat_signals) and not self._has_code_signal(lower):
+            return self._quick_route("chat", user_input, "keyword")
+
+        # office: 办公文档
+        office_signals = [".xlsx", ".docx", ".pptx", "excel", "word文档",
+                          "ppt", "幻灯片", "演示文稿", "汇报"]
+        if any(s in lower for s in office_signals):
+            return self._quick_route("office", user_input, "keyword")
+
+        # ══════════════════════════════════════
+        # 优先级2：测试gap路由（confidence >= 0.7）
+        # ══════════════════════════════════════
+        if gap and gap.gap_type not in (GapType.UNKNOWN, GapType.NONE) and gap.confidence >= 0.7:
+            expert_type = GAP_TO_EXPERT_TYPE.get(gap.gap_type)
+            if expert_type:
+                result = {
+                    "expert_type": expert_type,
+                    "task_summary": user_input[:10],
+                    "difficulty": self._compute_difficulty_from_gap(gap),
+                    "routing_source": "gap_detector",
+                    "confidence": gap.confidence,
+                    "needs_search": False,
+                    "subtask_hint": "",
+                }
+                # 消解用户意图和gap的冲突
+                keyword_type = self._keyword_classify(lower)
+                if keyword_type and keyword_type != expert_type:
+                    resolved = self._resolve_intent_vs_gap(keyword_type, gap)
+                    result["expert_type"] = resolved
+                    if resolved != expert_type:
+                        result["routing_source"] = "conflict_user_wins"
+                return self._inject_registry(result, user_input)
+
+        # ══════════════════════════════════════
+        # 优先级3：文件特征检测（AST确定性）
+        # ══════════════════════════════════════
+        # 注：这里不做文件检测（需要project_root），由orchestrator在pre_test阶段通过gap完成
+
+        # ══════════════════════════════════════
+        # 优先级4：关键词匹配（保留现有逻辑）
+        # ══════════════════════════════════════
+        keyword_result = self._keyword_classify(lower)
+        if keyword_result:
+            confidence = self._keyword_confidence(lower, keyword_result)
+            if confidence >= 0.75:
+                result = {
+                    "expert_type": keyword_result,
+                    "task_summary": user_input[:10],
+                    "difficulty": "easy",
+                    "routing_source": "keyword",
+                    "confidence": confidence,
+                    "needs_search": self._needs_search(lower),
+                    "subtask_hint": "",
+                }
+                return self._inject_registry(result, user_input)
+
+        # ══════════════════════════════════════
+        # 优先级5：LLM兜底（只做最简单的二分类）
+        # ══════════════════════════════════════
+        llm_result = self._llm_minimal_classify(user_input)
+        # LLM返回的结果如果有_parse_error，保留chat降级行为（向后兼容）
+        if "_parse_error" in llm_result:
+            llm_result["routing_source"] = "llm_fallback"
+            llm_result["confidence"] = 0.3
+            return self._inject_registry(llm_result, user_input)
+        llm_result["routing_source"] = "llm_fallback"
+        llm_result["confidence"] = 0.55
+        return self._inject_registry(llm_result, user_input)
+        llm_result["confidence"] = 0.55
+        return self._inject_registry(llm_result, user_input)
+
+    def _quick_route(self, expert_type: str, user_input: str, source: str) -> dict:
+        """快速路由返回结构。"""
+        return {
+            "expert_type": expert_type,
+            "task_summary": user_input[:10],
+            "difficulty": "easy",
+            "routing_source": source,
+            "confidence": 0.95,
+            "needs_search": False,
+            "subtask_hint": "",
+            "expert_name": None,
+            "route_type": "general",
+        }
+
+    def _has_code_signal(self, lower: str) -> bool:
+        """检测是否有代码相关信号（避免误分类为chat）。"""
+        code_signals = [".py", ".js", ".ts", ".go", ".rs", ".java",
+                        "函数", "方法", "类", "接口", "bug", "修复",
+                        "实现", "创建", "生成", "重构", "代码"]
+        return any(s in lower for s in code_signals)
+
+    def _keyword_classify(self, lower: str) -> Optional[str]:
+        """关键词匹配分类。返回expert_type或None。"""
+        # 修复/bug类
+        repair_signals = ["修复", "fix", "bug", "报错", "错误", "失败",
+                          "不工作", "broken", "error"]
+        if any(s in lower for s in repair_signals):
+            return "locator_repair"
+
+        # 创建/生成类
+        create_signals = ["写一个", "创建", "生成", "新建", "from scratch",
+                          "写个", "实现一个", "generate", "create"]
+        if any(s in lower for s in create_signals):
+            return "codegen"
+
+        # 重构类
+        refactor_signals = ["重构", "优化", "整理", "拆分", "extract",
+                            "rename", "refactor"]
+        if any(s in lower for s in refactor_signals):
+            return "refactor"
+
+        # 文档类
+        doc_signals = ["文档", "注释", "docstring", "readme", "doc"]
+        if any(s in lower for s in doc_signals):
+            return "doc"
+
+        return None
+
+    def _keyword_confidence(self, lower: str, expert_type: str) -> float:
+        """根据关键词匹配强度估算置信度。"""
+        STRONG_SIGNALS = {
+            "locator_repair": ["修复", "fix", "bug", "报错", "错误", "失败", ".py:", "line "],
+            "codegen": ["写一个", "创建", "生成", "新建", "from scratch", "写个"],
+            "refactor": ["重构", "优化", "整理", "拆分", "extract", "rename"],
+            "doc": ["文档", "注释", "docstring", "readme"],
+        }
+        signals = STRONG_SIGNALS.get(expert_type, [])
+        matched = sum(1 for s in signals if s in lower)
+        if matched >= 2:
+            return 0.92
+        elif matched == 1:
+            return 0.75
+        return 0.55
+
+    def _resolve_intent_vs_gap(self, user_expert: str, gap: Gap) -> str:
+        """
+        解决用户意图和gap的冲突，返回最终expert_type。
+        三层置信度消解：
+        - confidence >= 0.85 → gap优先
+        - 0.5-0.85 → 两者一致才用gap
+        - < 0.5 → 用户意图优先
+        """
+        gap_expert = GAP_TO_EXPERT_TYPE.get(gap.gap_type, user_expert)
+
+        if gap.confidence >= 0.85:
+            return gap_expert
+
+        if gap.confidence >= 0.5:
+            # 两者一致才用gap
+            return gap_expert if gap_expert == user_expert else user_expert
+
+        return user_expert
+
+    def _compute_difficulty_from_gap(self, gap: Gap) -> str:
+        """从gap计算任务难度。"""
+        if len(gap.files) > 2:
+            return "hard"
+        if gap.gap_type in (GapType.LOGIC_ERROR, GapType.NOT_IMPLEMENTED):
+            return "hard"
+        return "easy"
+
+    def _needs_search(self, lower: str) -> bool:
+        """检测是否需要实时搜索。"""
+        search_signals = ["天气", "气温", "weather", "股价", "汇率",
+                          "新闻", "最新", "最近", "today", "latest"]
+        return any(s in lower for s in search_signals)
+
+    def _llm_minimal_classify(self, user_input: str) -> dict:
+        """LLM只做最简单的二分类：新建文件 vs 修改文件。"""
+        prompt = GATE_PROMPT_MINIMAL.format(user_input=user_input[:200])
+
+        try:
+            raw = self.llm.generate(
+                prompt=prompt,
+                system=GATE_SYSTEM,
+                max_tokens=30,
+                temperature=0.0,
             )
-            if not any(fmt in lower for fmt in _OFFICE_FORMATS):
-                result["expert_type"] = "chat"  # 降级到chat
 
-        return result
+            # 尝试解析JSON响应
+            json_str = self._extract_json(raw)
+            try:
+                parsed = json.loads(json_str)
+                if "action" in parsed:
+                    if parsed["action"] == "create":
+                        return {
+                            "expert_type": "codegen",
+                            "task_summary": user_input[:10],
+                            "difficulty": "easy",
+                            "needs_search": False,
+                            "subtask_hint": "",
+                        }
+                    return {
+                        "expert_type": "locator_repair",
+                        "task_summary": user_input[:10],
+                        "difficulty": "easy",
+                        "needs_search": False,
+                        "subtask_hint": "",
+                    }
+                # 兼容旧格式Gate JSON
+                et = parsed.get("expert_type", "")
+                if et in VALID_EXPERT_TYPES:
+                    return {
+                        "expert_type": et,
+                        "task_summary": parsed.get("task_summary", user_input[:10]),
+                        "difficulty": parsed.get("difficulty", "easy"),
+                        "needs_search": bool(parsed.get("needs_search", False)),
+                        "subtask_hint": str(parsed.get("subtask_hint", "")),
+                    }
+            except (json.JSONDecodeError, ValueError, TypeError):
+                pass
+
+            # 简单文本匹配
+            if "create" in raw.lower() or "新建" in raw:
+                return {
+                    "expert_type": "codegen",
+                    "task_summary": user_input[:10],
+                    "difficulty": "easy",
+                    "needs_search": False,
+                    "subtask_hint": "",
+                }
+
+            # 无法解析 → 返回带_parse_error的chat降级
+            return {
+                "expert_type": "chat",
+                "task_summary": user_input[:10],
+                "difficulty": "easy",
+                "_parse_error": f"Cannot parse LLM output: {raw[:100]}",
+            }
+
+        except Exception as e:
+            logger.debug("LLM classify failed: %s", e)
+            return {
+                "expert_type": "chat",
+                "task_summary": user_input[:10],
+                "difficulty": "easy",
+                "_parse_error": str(e),
+            }
 
     def _parse(self, raw: str, user_input: str) -> dict:
-        """Parse and validate Gate output. Fallback on any failure."""
-        # Try to extract JSON from response (model might wrap it in text)
+        """Parse and validate Gate output (backward compat for tests)."""
         json_str = self._extract_json(raw)
         try:
             result = json.loads(json_str)
-            # Validate required fields
             et = result.get("expert_type", "")
-            diff = result.get("difficulty", "")
-            summary = result.get("task_summary", "")
-
             if et not in VALID_EXPERT_TYPES:
                 raise ValueError(f"Invalid expert_type: {et}")
-            if diff not in VALID_DIFFICULTIES:
-                raise ValueError(f"Invalid difficulty: {diff}")
-
             return {
                 "expert_type": et,
-                "task_summary": summary[:20] if summary else user_input[:10],
-                "difficulty": diff,
+                "task_summary": result.get("task_summary", user_input[:10]),
+                "difficulty": result.get("difficulty", "easy"),
                 "needs_search": bool(result.get("needs_search", False)),
                 "subtask_hint": str(result.get("subtask_hint", "")),
             }
         except (json.JSONDecodeError, ValueError, KeyError, AttributeError, TypeError) as e:
-            logger.warning("Gate parse failed (raw=%r): %s", raw[:200], e)
             return {
                 "expert_type": "chat",
                 "task_summary": user_input[:10],
@@ -226,37 +350,38 @@ class Gate:
     @staticmethod
     def _extract_json(text: str) -> str:
         """Extract first JSON object from text."""
-        # Find first { and last }
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
             return text[start:end + 1]
         return text.strip()
 
-    def _estimate_confidence(self, result: dict, user_input: str) -> float:
-        """
-        Estimate classification confidence based on keyword signal strength.
-        High confidence = user input contains clear type-signal words.
-        No LLM call, pure rules, <1ms.
-        """
-        et = result.get("expert_type", "")
-        lower = user_input.lower()
+    def _inject_registry(self, result: dict, user_input: str) -> dict:
+        """注入专家注册表信息（保留现有逻辑）。"""
+        result.setdefault("expert_name", None)
+        result.setdefault("route_type", "general")
 
-        STRONG_SIGNALS = {
-            "locator_repair": ["修复", "fix", "bug", "报错", "错误", "失败", ".py:", "line "],
-            "codegen":        ["写一个", "创建", "生成", "新建", "from scratch", "写个"],
-            "refactor":       ["重构", "优化", "整理", "拆分", "extract", "rename"],
-            "office":         [".xlsx", ".docx", ".pptx", "excel", "幻灯片", "演示文稿"],
-            "chat":           ["你好", "什么是", "解释", "为什么", "怎么理解"],
-            "vision":         ["图片", "截图", "设计图", "image", "screenshot"],
-        }
+        if self.registry:
+            match = self.registry.match(user_input)
+            if match:
+                expert = match["expert"]
+                expert_pipeline = tuple(expert["pipeline"])
+                general_pipeline = tuple(
+                    EXPERT_SEQUENCES.get(result["expert_type"], ["generator", "verifier"])
+                )
 
-        signals = STRONG_SIGNALS.get(et, [])
-        matched = sum(1 for s in signals if s in lower)
+                result["expert_name"] = match["name"]
+                if "confidence" not in result or match["confidence"] > result.get("confidence", 0):
+                    result["confidence"] = match["confidence"]
+                result["system_prompt"] = expert.get("instructions") or expert.get("system_prompt", "")
 
-        if matched >= 2:
-            return 0.92
-        elif matched == 1:
-            return 0.75
-        else:
-            return 0.55
+                if expert_pipeline == general_pipeline:
+                    result["route_type"] = "expert_registry"
+                    result["pipeline"] = list(expert_pipeline)
+                else:
+                    result["route_type"] = "general_with_expert"
+
+        if "confidence" not in result:
+            result["confidence"] = 0.55
+
+        return result

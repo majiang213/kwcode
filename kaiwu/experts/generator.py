@@ -24,6 +24,7 @@ GENERATOR_BASE_SYSTEM = """## 行为准则（硬约束）
 - 不触碰报错行±20行范围外的无关代码。
 - 不添加任何import/类型注解/docstring/注释到未修改的代码。
 - 例外：任务明确要求重构/拆分时，不受上述行数限制。
+- 例外：存根实现任务（scope=whole_file）时，实现所有目标函数，不受2个函数限制。
 
 禁止操作:
 - 禁止猜测API端点/函数签名/配置键——必须先read_file确认。
@@ -244,7 +245,15 @@ class GeneratorExpert:
                 if snippet:
                     file_funcs = ["_whole_snippet_"]
 
-            for func_name in file_funcs[:2]:  # Cap at 2 functions per file
+            # MoE: scope决定每个文件处理多少函数
+            # whole_file scope时不限制2个，处理所有target_functions
+            _max_funcs_per_file = 2  # 默认cap
+            if ctx.gap and hasattr(ctx.gap, 'gap_type'):
+                from kaiwu.core.gap_detector import GapType
+                if ctx.gap.gap_type in (GapType.NOT_IMPLEMENTED, GapType.STUB_RETURNS_NONE):
+                    _max_funcs_per_file = len(file_funcs)  # 不限制
+
+            for func_name in file_funcs[:_max_funcs_per_file]:
                 key = (fpath, func_name)
                 if key in seen:
                     continue

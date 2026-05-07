@@ -88,3 +88,13 @@ class TaskContext:
 
     # 实际可用ctx大小（orchestrator检测后写入）
     effective_ctx: int = 32768
+
+    # ── MoE架构新增字段 ──
+    # Gap信息（GapDetector计算，驱动所有决策）
+    gap: Optional["Any"] = None  # Gap dataclass instance
+
+    # 确认可用的测试命令（EnvProber提供）
+    confirmed_test_cmd: str = ""
+
+    # 路由来源（用于审计）："gap_detector"/"file_signal"/"keyword"/"llm_fallback"
+    routing_source: str = ""
