@@ -457,16 +457,45 @@ class GeneratorExpert:
         if think_cfg.get("think") and self.llm._is_reasoning:
             base_tokens += think_cfg.get("budget", 0)
 
+        # ── Best-of-N采样：生成多个候选，选语法正确的最佳版本 ──
+        candidates = []
         for temp in self.temperatures:
             raw = self.llm.generate(prompt=prompt, system=system, max_tokens=base_tokens, temperature=temp)
-            # 审计：记录LLM调用的输入输出
             self._log_llm_call(ctx, "generator", prompt, system, raw)
             modified = self._clean_code_output(raw)
             if modified and modified != original:
-                return modified
+                if self._is_valid_syntax(modified):
+                    # 语法正确，直接返回（优先低温度的确定性结果）
+                    return modified
+                else:
+                    # 语法错误但有内容，存为候选
+                    candidates.append(modified)
+
+        # 所有温度都语法错误时，返回第一个候选（让verifier报具体错误）
+        if candidates:
+            logger.debug("Generator: no syntax-valid candidate, returning best-effort")
+            return candidates[0]
 
         logger.warning("Generator: all candidates identical to original or empty")
         return None
+
+    @staticmethod
+    def _is_valid_syntax(code: str) -> bool:
+        """检查Python代码语法是否正确。非Python代码直接返回True。"""
+        import ast
+        stripped = code.strip()
+        if not stripped:
+            return False
+        first_line = stripped.split("\n")[0].strip()
+        python_indicators = ("def ", "class ", "import ", "from ", "if ", "for ",
+                             "while ", "try:", "with ", "async ", "@")
+        if not any(first_line.startswith(p) for p in python_indicators):
+            return True  # 非Python代码，跳过语法检查
+        try:
+            ast.parse(code)
+            return True
+        except SyntaxError:
+            return False
 
     @staticmethod
     def _extract_func_name_from_code(code: str) -> str:
