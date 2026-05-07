@@ -393,6 +393,11 @@ class GeneratorExpert:
 
         # AdaptThink: 根据think_config调整max_tokens
         base_tokens = 2048
+        # scope=whole_file时提升token预算（需要实现多个函数）
+        if ctx.gap and hasattr(ctx.gap, 'gap_type'):
+            from kaiwu.core.gap_detector import GapType
+            if ctx.gap.gap_type in (GapType.NOT_IMPLEMENTED, GapType.STUB_RETURNS_NONE):
+                base_tokens = 4096
         think_cfg = getattr(ctx, 'think_config', {})
         if think_cfg.get("think") and self.llm._is_reasoning:
             base_tokens += think_cfg.get("budget", 0)

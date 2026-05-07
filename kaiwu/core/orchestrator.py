@@ -676,11 +676,11 @@ class PipelineOrchestrator:
         """Record success: memory, registry, trajectory, AB, value, milestone, reflection."""
         # Reviewer: 需求对齐审查 — 不对齐返回None让调用方重试
         review_result = self._do_review(ctx, on_status)
-        if review_result and not review_result.get("aligned") and review_result.get("confidence", 0) >= 0.6:
+        if review_result and not review_result.get("aligned") and review_result.get("confidence", 0) >= 0.7:
             gap = review_result.get("gap", "")
             self._emit(on_status, "review_reject", f"审查不通过：{gap}")
-            # 把gap作为retry_hint注入，让Generator下次修正
-            ctx.retry_hint = f"上次修改审查不通过：{gap}。请重新修改确保满足用户需求。"
+            ctx.retry_hint = f"改错了：{gap}"
+            ctx.locator_output = None  # 强制重新定位修复
             return None  # 返回None信号给retry loop
 
         checkpoint.discard()  # 审查通过才清理快照

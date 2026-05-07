@@ -165,6 +165,10 @@ class GapDetector:
     def _build_not_implemented_gap(self, output: str, project_root: str) -> Gap:
         files = self._extract_error_files(output)
         functions = self._extract_function_names(output)
+        # AST存根扫描：找到所有pass函数，提供完整target_functions
+        stub_functions = self._scan_stubs_in_files(files, project_root)
+        if stub_functions:
+            functions = stub_functions
         return Gap(
             GapType.NOT_IMPLEMENTED, 0.9,
             files, functions, output[:200],
@@ -174,6 +178,10 @@ class GapDetector:
     def _build_stub_none_gap(self, output: str, project_root: str) -> Gap:
         files = self._extract_error_files(output)
         functions = self._extract_function_names(output)
+        # AST存根扫描
+        stub_functions = self._scan_stubs_in_files(files, project_root)
+        if stub_functions:
+            functions = stub_functions
         return Gap(
             GapType.STUB_RETURNS_NONE, 0.85,
             files, functions, output[:200],
@@ -235,3 +243,55 @@ class GapDetector:
                 'run', 'main', '__init__', 'execute'}
         result = [f for f in functions if f not in skip and not f.startswith('test_')]
         return list(set(result))[:5]
+
+    def _scan_stubs_in_files(self, files: list[str], project_root: str) -> list[str]:
+        """AST扫描文件中的pass/raise NotImplementedError存根函数。"""
+        import ast as _ast
+        stub_functions = []
+        for fpath in files[:3]:
+            # 构建绝对路径
+            if not os.path.isabs(fpath):
+                fpath = os.path.join(project_root, fpath)
+            if not os.path.exists(fpath) or not fpath.endswith('.py'):
+                continue
+            try:
+                with open(fpath, encoding='utf-8', errors='ignore') as f:
+                    source = f.read()
+                tree = _ast.parse(source)
+            except Exception:
+                continue
+            for node in _ast.walk(tree):
+                if not isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    continue
+                if node.name.startswith('__') and node.name.endswith('__'):
+                    continue
+                if self._is_stub_body(node.body):
+                    stub_functions.append(node.name)
+        return stub_functions
+
+    @staticmethod
+    def _is_stub_body(body: list) -> bool:
+        """判断函数体是否是存根。"""
+        import ast as _ast
+        if not body:
+            return True
+        # 跳过docstring
+        real_body = body
+        if (len(body) >= 1 and isinstance(body[0], _ast.Expr) and
+                isinstance(body[0].value, _ast.Constant) and
+                isinstance(body[0].value.value, str)):
+            real_body = body[1:]
+        if not real_body:
+            return True
+        if len(real_body) == 1:
+            stmt = real_body[0]
+            if isinstance(stmt, _ast.Pass):
+                return True
+            if isinstance(stmt, _ast.Raise):
+                return True
+            if isinstance(stmt, _ast.Expr) and isinstance(stmt.value, _ast.Constant):
+                if stmt.value.value is ...:
+                    return True
+            if isinstance(stmt, _ast.Return) and stmt.value is None:
+                return True
+        return False
