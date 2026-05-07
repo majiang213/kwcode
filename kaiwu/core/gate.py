@@ -263,6 +263,9 @@ class Gate:
                 max_tokens=30,
                 temperature=0.0,
             )
+            # DetailedLogger: 记录 Gate LLM 调用（通过 llm._on_llm_call 已自动记录，
+            # 这里额外记录解析结果到 logger）
+            logger.debug("[gate_llm] prompt=%s, raw=%s", prompt[:200], raw[:200])
 
             # 尝试解析JSON响应
             json_str = self._extract_json(raw)

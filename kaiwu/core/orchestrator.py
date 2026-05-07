@@ -45,6 +45,7 @@ from kaiwu.flywheel.strategy_stats import StrategyStats
 from kaiwu.flywheel.user_pattern_memory import UserPatternMemory
 from kaiwu.telemetry.client import TelemetryClient
 from kaiwu.audit.logger import AuditLogger
+from kaiwu.audit.detailed_logger import DetailedLogger
 from kaiwu.core.model_capability import detect_model_tier, STRATEGIES, ModelTier
 
 logger = logging.getLogger(__name__)
@@ -178,6 +179,28 @@ class PipelineOrchestrator:
         start_time = time.time()
         self._audit.start()
 
+        # ── DetailedLogger：完整流水线日志 ──
+        model_name = getattr(self, '_model_name', 'unknown')
+        self._detailed = DetailedLogger(user_input=user_input, model=model_name)
+        self._detailed.set_metadata(
+            project_root=project_root,
+            gate_result=gate_result,
+        )
+        # 设置 LLM 回调，自动记录每次调用
+        if self._detailed.enabled:
+            def _llm_hook(messages, raw_output, elapsed_ms):
+                self._detailed.log_llm(
+                    caller="llm_backend",
+                    prompt="",
+                    system="",
+                    raw_output=raw_output,
+                    elapsed_ms=elapsed_ms,
+                    messages=messages,
+                )
+            llm = getattr(self.generator, 'llm', None)
+            if llm and hasattr(llm, '_on_llm_call'):
+                llm._on_llm_call = _llm_hook
+
         # 任务级超时看门狗
         TASK_TIMEOUT_S = 300  # 单任务最长5分钟
         _watchdog_triggered = threading.Event()
@@ -201,6 +224,8 @@ class PipelineOrchestrator:
         )
         # 注入审计日志引用，让Generator等专家能记录LLM调用
         ctx._audit_logger = self._audit
+        # 注入 DetailedLogger 引用到 ctx，让 Generator 等专家能直接写入
+        ctx._detailed_logger = self._detailed
 
         # 模型能力等级注入ctx
         ctx.model_tier = self._model_tier.value
@@ -331,6 +356,10 @@ class PipelineOrchestrator:
             sequence = EXPERT_SEQUENCES.get(expert_type, ["generator", "verifier"])
 
         self._emit(on_status, "gate", f"任务类型：{expert_type} | 难度：{gate_result.get('difficulty', '?')} | 路由：{ctx.routing_source}")
+        # DetailedLogger: gate 决策
+        self._detailed.log_node("gate",
+            {"user_input": user_input[:500]},
+            {"expert_type": expert_type, "difficulty": gate_result.get("difficulty", "?"), "routing_source": ctx.routing_source, "confidence": gate_result.get("confidence", 0), "sequence": sequence})
 
         # ── MoE专家选择（已移除独立Expert类，统一走pipeline） ──
         moe_expert = self._select_moe_expert(ctx, expert_type)
@@ -468,6 +497,11 @@ class PipelineOrchestrator:
 
             self._emit(on_status, "retry", f"第{ctx.retry_count}次尝试失败：{error_detail[:100]}")
             self.bus.emit("retry", {"count": ctx.retry_count, "error": error_detail[:100]})
+            # DetailedLogger: 记录重试决策
+            self._detailed.log_decision("retry",
+                decision=f"retry #{ctx.retry_count}, strategy={retry_strategy.get('sequence', [])}",
+                reason=f"error_type={current_error_type}, detail={error_detail[:200]}",
+                context={"error_type_streak": ctx._error_type_streak, "attempt_record": attempt_record})
 
             # 第2次重试前反思：让LLM分析失败原因
             if ctx.retry_count == 1 and ctx.verifier_output and ctx.generator_output:
@@ -566,6 +600,8 @@ class PipelineOrchestrator:
                 ctx.generator_output = {"explanation": "我是KWCode，专注于代码任务。", "patches": []}
                 result = {"passed": True}
             elapsed = time.time() - start_time
+            self._detailed.log_node("chat", {"user_input": ctx.user_input[:500]}, {"explanation": (ctx.generator_output or {}).get("explanation", "")[:500]})
+            self._detailed.write(expert_type="chat", success=True)
             return {
                 "success": True,
                 "context": ctx,
@@ -723,6 +759,8 @@ class PipelineOrchestrator:
         self._record_flywheel(ctx, gate_result, True)
         # 审计日志
         self._audit.write(ctx, elapsed, True, getattr(self, '_model_name', 'unknown'))
+        # DetailedLogger: 写入成功日志
+        self._detailed.write(expert_type=gate_result.get("expert_type", "unknown"), success=True)
         return {
             "success": True,
             "context": ctx,
@@ -763,6 +801,8 @@ class PipelineOrchestrator:
         self._record_flywheel(ctx, gate_result, False)
         # 审计日志
         self._audit.write(ctx, elapsed, False, getattr(self, '_model_name', 'unknown'))
+        # DetailedLogger: 写入失败日志
+        self._detailed.write(expert_type=gate_result.get("expert_type", "unknown"), success=False)
         return {
             "success": False,
             "context": ctx,
@@ -779,6 +819,7 @@ class PipelineOrchestrator:
                 search_result = self._search_subagent.search(ctx, self._manifest)
                 if not search_result or not search_result.get("relevant_files"):
                     self._emit(on_status, "locator_fail", "定位失败")
+                    self._detailed.log_node("locator", {"user_input": ctx.user_input[:200]}, {"result": None}, detail="定位失败")
                     return False
                 # 将干净结果传给ctx（Generator只看到这些）
                 ctx.locator_output = {
@@ -795,17 +836,26 @@ class PipelineOrchestrator:
                 funcs = search_result["relevant_functions"]
                 func_str = ', '.join(funcs[:3]) if funcs else "（文件级修改）"
                 self._emit(on_status, "locator_done", f"文件：{', '.join(files[:3])} | 函数：{func_str}")
+                # DetailedLogger: locator 节点
+                self._detailed.log_node("locator",
+                    {"user_input": ctx.user_input[:200], "gap_type": str(ctx.gap.gap_type.value) if ctx.gap and hasattr(ctx.gap, 'gap_type') else ""},
+                    {"files": files, "functions": funcs, "method": search_result.get("method", ""), "upstream_constraints": search_result.get("upstream_constraints", "")[:500]})
 
             elif step == "generator":
                 self._emit(on_status, "generator", "生成patch...")
                 result = self.generator.run(ctx)
                 if not result:
                     self._emit(on_status, "generator_fail", "生成失败")
+                    self._detailed.log_node("generator", {"files": (ctx.locator_output or {}).get("relevant_files", [])}, {"result": None}, detail="生成失败")
                     return False
                 n_patches = len(result.get("patches", []))
                 self._emit(on_status, "generator_done", f"生成{n_patches}个patch")
                 # 用新patch更新manifest（跨文件追踪）
                 self._manifest.update(result.get("patches", []))
+                # DetailedLogger: generator 节点
+                self._detailed.log_node("generator",
+                    {"files": (ctx.locator_output or {}).get("relevant_files", []), "functions": (ctx.locator_output or {}).get("relevant_functions", [])},
+                    {"patch_count": n_patches, "files_modified": [p.get("file", "") for p in result.get("patches", [])], "explanation": result.get("explanation", "")})
 
             elif step == "verifier":
                 self._emit(on_status, "verifier", "验证中...")
@@ -826,15 +876,22 @@ class PipelineOrchestrator:
                         "error_message": detail[:200],
                         "failed_tests": [],
                     }
+                    self._detailed.log_node("verifier", {"patch_count": len((ctx.generator_output or {}).get("patches", []))}, {"passed": False, "error_type": "contract_violation", "detail": detail[:300]})
                     return False
                 result = self.verifier.run(ctx)
                 if not result or not result.get("passed"):
                     detail = result.get("error_detail", "unknown") if result else "no result"
                     self._emit(on_status, "verifier_fail", f"验证失败：{detail[:80]}")
+                    self._detailed.log_node("verifier",
+                        {"patch_count": len((ctx.generator_output or {}).get("patches", []))},
+                        {"passed": False, "error_type": result.get("error_type", "") if result else "", "error_detail": detail[:1000], "tests_passed": result.get("tests_passed", 0) if result else 0, "tests_total": result.get("tests_total", 0) if result else 0})
                     return False
                 tp = result.get("tests_passed", 0)
                 tt = result.get("tests_total", 0)
                 self._emit(on_status, "verifier_done", f"语法OK | 测试：{tp}/{tt}")
+                self._detailed.log_node("verifier",
+                    {"patch_count": len((ctx.generator_output or {}).get("patches", []))},
+                    {"passed": True, "tests_passed": tp, "tests_total": tt})
 
             elif step == "office":
                 self._emit(on_status, "office", "生成Office文档...")

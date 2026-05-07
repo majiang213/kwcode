@@ -10,8 +10,7 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)]()
 [![Tests](https://img.shields.io/badge/Tests-282%2F282-brightgreen.svg)]()
-[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg)]()
-
+[![Version](https://img.shields.io/badge/Version-1.7.0-blue.svg)]()
 </div>
 
 ---

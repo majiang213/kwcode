@@ -73,6 +73,8 @@ class LLMBackend:
         self._total_output_tokens: int = 0
         self._call_count: int = 0
         self._token_budget: int = 0  # 0 = unlimited
+        # DetailedLogger 回调：每次 LLM 调用后触发（由 orchestrator 设置）
+        self._on_llm_call = None  # Callable(caller, messages, raw_output, tokens, elapsed_ms)
 
         # Prefer native llama.cpp if model_path provided and library available
         if model_path and HAS_LLAMA_CPP:
@@ -122,7 +124,14 @@ class LLMBackend:
         # If it's not localhost at all, assume OpenAI-compatible
         if "localhost" not in url_lower and "127.0.0.1" not in url_lower:
             return True
-        return False
+        # For localhost on non-standard ports, probe /api/tags to detect Ollama
+        try:
+            resp = httpx.get(f"{url.rstrip('/')}/api/tags", timeout=3)
+            if resp.status_code == 200 and "models" in resp.text:
+                return False  # It's Ollama
+        except Exception:
+            pass
+        return True  # Not Ollama, assume OpenAI-compatible
 
     @property
     def token_usage(self) -> dict:
@@ -211,6 +220,20 @@ class LLMBackend:
         self._last_elapsed = _time.perf_counter() - t0
         if self._tps_estimator:
             self._tps_estimator.record(result, self._last_elapsed)
+        # DetailedLogger 回调
+        if self._on_llm_call:
+            try:
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": prompt})
+                self._on_llm_call(
+                    messages=messages,
+                    raw_output=result,
+                    elapsed_ms=self._last_elapsed * 1000,
+                )
+            except Exception:
+                pass
         return result
 
     def _generate_native(
@@ -281,6 +304,16 @@ class LLMBackend:
         self._last_elapsed = _time.perf_counter() - t0
         if self._tps_estimator:
             self._tps_estimator.record(result, self._last_elapsed)
+        # DetailedLogger 回调
+        if self._on_llm_call:
+            try:
+                self._on_llm_call(
+                    messages=messages,
+                    raw_output=result,
+                    elapsed_ms=self._last_elapsed * 1000,
+                )
+            except Exception:
+                pass
         return result
 
     def _chat_ollama(

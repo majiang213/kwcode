@@ -4,6 +4,32 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.7.0] - 2026-05-07
+
+### KAIJU架构借鉴 + DetailedLogger + Bounded Context
+
+**核心理念**：借鉴KAIJU三个具体机制——bounded context per node、sub-task decomposition、完整流水线日志。
+
+### Added
+
+- **DetailedLogger完整流水线日志**（`kaiwu/audit/detailed_logger.py`）：每个任务生成独立JSON日志到`logs/`目录，记录LLM完整prompt/output（不截断）、各节点输入输出、工程决策（重试/熔断/搜索）。环境变量`KWCODE_DETAIL_LOG_DIR`可配置输出目录
+- **LLM Backend on_call钩子**：每次LLM调用自动触发回调，记录完整messages和response到DetailedLogger
+- **存根任务sub-task decomposition**（`_run_stub_decomposed`）：多个pass函数不再一次性让LLM实现，而是逐函数独立调用，每个函数独立context+独立失败筛选，一个函数失败不影响其他
+- **`_find_stub_functions`**：精确检测文件中的stub函数（pass/.../ return None/raise NotImplementedError）
+- **`_filter_relevant_failures`**：按函数名/文件名筛选相关测试失败，只给LLM看它需要的信息
+
+### Changed
+
+- **Generator bounded context**：`_generate_modified`不再注入全部8条structured_failures和完整retry_hint，而是只传与当前函数相关的失败（通过函数名/文件名匹配筛选），retry_hint截断到300字符
+- **OpenAI兼容API检测修复**：localhost非标准端口（如kaiwu部署器11435）现在通过探测`/api/tags`判断是否Ollama，不再错误地走`/api/chat`导致404
+- **Gate LLM调用记录**：`_llm_minimal_classify`中增加debug日志记录prompt和raw output
+
+### Fixed
+
+- **kaiwu部署器（llama.cpp server）兼容**：`_detect_openai_compat`对`127.0.0.1:11435`正确返回True（OpenAI兼容），不再当作Ollama
+
+---
+
 ## [1.6.2] - 2026-05-07
 
 ### 执行反馈深度升级 + 存根任务修复

@@ -10,13 +10,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)]()
 [![Multi-Platform Tests](https://github.com/val1813/kwcode/actions/workflows/test.yml/badge.svg)](https://github.com/val1813/kwcode/actions/workflows/test.yml)
-[![Version](https://img.shields.io/badge/Version-1.6.2-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-1.7.0-blue.svg)]()
 
 </div>
 
 ---
 
-> **v1.6.2 已发布！** 执行反馈深度升级：结构化测试失败解析 + TraceCoder历史教训累积 + whole_file写入修复。安装命令：
+> **v1.7.0 已发布！** KAIJU架构借鉴：Generator bounded context + 存根任务sub-task decomposition + DetailedLogger完整流水线日志。安装命令：
 >
 > ```bash
 > pip install kwcode
@@ -30,6 +30,7 @@
 
 | 日期 | 内容 |
 |------|------|
+| 05-07 | **v1.7.0** KAIJU架构借鉴：Generator bounded context(只传当前函数+相关测试) + 存根任务sub-task decomposition(逐函数独立实现) + DetailedLogger完整流水线日志(不截断LLM输入输出) + OpenAI兼容API检测修复(kaiwu部署器兼容) |
 | 05-07 | **v1.6.2** 执行反馈深度升级：结构化测试失败解析(parse_test_failures) + TraceCoder历史教训累积(attempt_history) + whole_file写入修复(存根任务不再patches=0) + 完整审计日志(llm_calls/node_io) + pytest -v详细输出 |
 | 05-07 | **v1.6.1** 架构收敛：删除WholeFileImplExpert/DependencyFixExpert，纯确定性机制驱动pipeline。Generator增强(upstream_constraints注入system prompt + retry_hint携带上次代码 + tier=small填空框架)。License改为Apache-2.0。513 tests green |
 | 05-07 | **v1.6.0** MoE确定性架构：GapDetector(11种GapType,零LLM) + ExecutionStateTracker(回归检测) + EnvProber(工具链/依赖自动修复) + Gate确定性优先路由 + 63个专项诊断测试 |

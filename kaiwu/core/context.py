@@ -110,3 +110,6 @@ class TaskContext:
 
     # 审计日志引用（Generator等专家通过此记录LLM调用）
     _audit_logger: "Any" = None
+
+    # DetailedLogger引用（完整不截断的流水线日志）
+    _detailed_logger: "Any" = None

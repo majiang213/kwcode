@@ -217,11 +217,12 @@ class GeneratorExpert:
         if self._is_test_generation_task(ctx):
             return self._run_test_generation(ctx, files)
 
-        # ── whole_file scope: 存根实现，LLM返回完整文件 ──
+        # ── whole_file scope: 存根实现 ──
+        # Sub-task decomposition: 逐函数独立实现，每个函数独立context
         if ctx.gap and hasattr(ctx.gap, 'gap_type'):
             from kaiwu.core.gap_detector import GapType
             if ctx.gap.gap_type in (GapType.NOT_IMPLEMENTED, GapType.STUB_RETURNS_NONE):
-                return self._run_whole_file(ctx, files)
+                return self._run_stub_decomposed(ctx, files, funcs)
 
         # For each file+function pair, extract original and generate modified
         # Deduplicate: only patch each (file, function) once
@@ -367,7 +368,8 @@ class GeneratorExpert:
         return any(kw in lower for kw in _WEB_KEYWORDS)
 
     def _generate_modified(self, ctx: TaskContext, fpath: str, original: str, task_desc: str) -> Optional[str]:
-        """Ask LLM to generate modified code. Hashline primary, full-function fallback."""
+        """Ask LLM to generate modified code. Hashline primary, full-function fallback.
+        Bounded context: only pass current function + relevant failing tests."""
         search_ctx = ""
         if ctx.search_results:
             search_ctx = f"参考资料：\n{ctx.search_results}"
@@ -392,38 +394,55 @@ class GeneratorExpert:
         if ctx.doc_context:
             prompt += f"\n\n## 相关文档参考\n{ctx.doc_context[:800]}"
 
-        # 注入初始测试失败信息（让LLM第一次就看到具体报错）
+        # ── Bounded context: 只注入与当前函数相关的 failing tests ──
+        # 从 structured_failures 中筛选与当前函数/文件相关的条目
         initial_failure = getattr(ctx, 'initial_test_failure', '')
-
-        # 结构化失败信息（精确告诉LLM每个测试为什么失败）— 首次和重试都注入
         structured = (ctx.verifier_output or {}).get("structured_failures", [])
         if not structured and initial_failure:
             from kaiwu.core.test_parser import parse_test_failures
             structured = parse_test_failures(initial_failure)
-        if structured:
-            lines = ["## 必须修复的测试失败（精确信息）"]
-            for f in structured[:8]:
-                name = f.get("test_name", "?")
-                expected = f.get("expected", "")
-                actual = f.get("actual", "")
-                snippet = f.get("snippet", "")
-                err_type = f.get("error_type", "")
-                if expected and actual:
-                    lines.append(f"- {name}: 期望 {expected}，实际 {actual}")
-                elif err_type and snippet:
-                    lines.append(f"- {name}: {err_type}: {snippet[:120]}")
-                elif snippet:
-                    lines.append(f"- {name}: {snippet[:120]}")
-                else:
-                    lines.append(f"- {name}")
-            prompt += "\n\n" + "\n".join(lines)
-        elif initial_failure and ctx.retry_count == 0:
-            # fallback: 没解析出结构化信息时给raw output
-            prompt += f"\n\n## 当前测试失败\n{initial_failure[:800]}"
 
-        # Inject retry_hint if available
+        if structured:
+            # 提取当前函数名（从 original 的第一行 def/class 获取）
+            current_func = self._extract_func_name_from_code(original)
+            # 筛选与当前函数/文件相关的失败
+            relevant_failures = self._filter_relevant_failures(structured, current_func, fpath)
+            if relevant_failures:
+                lines = ["## 必须修复的测试失败（精确信息）"]
+                for f in relevant_failures[:5]:
+                    name = f.get("test_name", "?")
+                    expected = f.get("expected", "")
+                    actual = f.get("actual", "")
+                    snippet = f.get("snippet", "")
+                    err_type = f.get("error_type", "")
+                    if expected and actual:
+                        lines.append(f"- {name}: 期望 {expected}，实际 {actual}")
+                    elif err_type and snippet:
+                        lines.append(f"- {name}: {err_type}: {snippet[:120]}")
+                    elif snippet:
+                        lines.append(f"- {name}: {snippet[:120]}")
+                    else:
+                        lines.append(f"- {name}")
+                prompt += "\n\n" + "\n".join(lines)
+            elif not relevant_failures and structured:
+                # 没有精确匹配时，给前3条作为上下文（但不是全部）
+                lines = ["## 相关测试失败"]
+                for f in structured[:3]:
+                    name = f.get("test_name", "?")
+                    snippet = f.get("snippet", "")
+                    lines.append(f"- {name}: {snippet[:100]}" if snippet else f"- {name}")
+                prompt += "\n\n" + "\n".join(lines)
+        elif initial_failure and ctx.retry_count == 0:
+            # fallback: 没解析出结构化信息时给精简的 raw output
+            prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
+
+        # Inject retry_hint: 只传一句话总结，不传完整历史
         if ctx.retry_hint:
-            prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
+            # 截断 retry_hint，避免注入过多历史
+            hint = ctx.retry_hint
+            if len(hint) > 300:
+                hint = hint[:300] + "..."
+            prompt += f"\n\n## 重试提示\n{hint}"
 
         system = self._build_system(ctx)
 
@@ -448,6 +467,41 @@ class GeneratorExpert:
 
         logger.warning("Generator: all candidates identical to original or empty")
         return None
+
+    @staticmethod
+    def _extract_func_name_from_code(code: str) -> str:
+        """从代码片段中提取函数/类名。"""
+        for line in code.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("def "):
+                # def func_name(...)
+                name = stripped[4:].split("(")[0].strip()
+                return name
+            if stripped.startswith("class "):
+                name = stripped[6:].split("(")[0].split(":")[0].strip()
+                return name
+        return ""
+
+    @staticmethod
+    def _filter_relevant_failures(failures: list, func_name: str, file_path: str) -> list:
+        """筛选与当前函数/文件相关的测试失败。"""
+        if not func_name:
+            return failures[:5]  # 无法确定函数名时返回前5条
+
+        relevant = []
+        fname_lower = func_name.lower()
+        fpath_base = file_path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] if file_path else ""
+
+        for f in failures:
+            test_name = f.get("test_name", "").lower()
+            snippet = f.get("snippet", "").lower()
+            # 测试名包含函数名，或 snippet 中提到函数名/文件名
+            if (fname_lower in test_name or
+                fname_lower in snippet or
+                (fpath_base and fpath_base.lower() in snippet)):
+                relevant.append(f)
+
+        return relevant
 
     def _try_hashline(self, ctx: TaskContext, fpath: str, original: str,
                       task_desc: str, search_ctx: str) -> Optional[str]:
@@ -853,11 +907,22 @@ class GeneratorExpert:
                     output_tokens=output_tokens,
                     engineering_actions={},
                 )
+            # DetailedLogger: 完整不截断记录
+            detailed = getattr(ctx, '_detailed_logger', None)
+            if detailed and detailed.enabled:
+                detailed.log_llm(
+                    caller=caller,
+                    prompt=prompt,
+                    system=system,
+                    raw_output=raw_output or '',
+                    tokens={"input": len(prompt) // 4 + len(system) // 4, "output": len(raw_output or '') // 4},
+                )
         except Exception:
             pass  # 非阻塞
 
     def _run_whole_file(self, ctx: TaskContext, files: list[str]) -> Optional[dict]:
-        """whole_file scope：LLM返回完整文件内容，直接write_file，不走apply_patch。"""
+        """whole_file scope：LLM返回完整文件内容，直接write_file，不走apply_patch。
+        Fallback for _run_stub_decomposed when decomposition fails."""
         patches = []
         explanation_parts = []
 
@@ -917,3 +982,178 @@ class GeneratorExpert:
         }
         ctx.generator_output = result
         return result
+
+    def _run_stub_decomposed(self, ctx: TaskContext, files: list[str], funcs: list[str]) -> Optional[dict]:
+        """
+        Sub-task decomposition for stub tasks.
+        Instead of asking LLM to implement all pass functions at once,
+        decompose into per-function subtasks with independent bounded context.
+        Each function gets its own LLM call with only its code + relevant tests.
+        Falls back to _run_whole_file if decomposition fails.
+        """
+        patches = []
+        explanation_parts = []
+
+        for fpath in files[:3]:
+            if "test" in fpath.lower():
+                continue
+
+            # Read file content
+            if self.tools:
+                content = self.tools.read_file(fpath)
+            else:
+                content = ctx.relevant_code_snippets.get(fpath, "")
+            if not content or content.startswith("[ERROR]"):
+                continue
+
+            # Find all stub functions (pass/... body)
+            stub_funcs = self._find_stub_functions(content)
+            if not stub_funcs:
+                continue
+
+            # If only 1-2 stubs, or file is small, use whole_file (simpler)
+            if len(stub_funcs) <= 2 or len(content.split("\n")) < 50:
+                result = self._run_whole_file(ctx, [fpath])
+                if result:
+                    return result
+                continue
+
+            # ── Per-function decomposition ──
+            initial_failure = getattr(ctx, 'initial_test_failure', '')
+            structured_failures = (ctx.verifier_output or {}).get("structured_failures", [])
+            if not structured_failures and initial_failure:
+                from kaiwu.core.test_parser import parse_test_failures
+                structured_failures = parse_test_failures(initial_failure)
+
+            file_patches = []
+            for func_name, func_code in stub_funcs:
+                # Build bounded context for this single function
+                relevant_tests = self._filter_relevant_failures(
+                    structured_failures, func_name, fpath
+                )
+
+                test_info = ""
+                if relevant_tests:
+                    lines = []
+                    for f in relevant_tests[:3]:
+                        name = f.get("test_name", "?")
+                        expected = f.get("expected", "")
+                        actual = f.get("actual", "")
+                        snippet = f.get("snippet", "")
+                        if expected and actual:
+                            lines.append(f"- {name}: 期望 {expected}，实际 {actual}")
+                        elif snippet:
+                            lines.append(f"- {name}: {snippet[:120]}")
+                        else:
+                            lines.append(f"- {name}")
+                    test_info = "\n\n## 相关测试\n" + "\n".join(lines)
+
+                prompt = (
+                    f"任务：{ctx.user_input[:200]}\n\n"
+                    f"实现以下函数（来自 {fpath}）：\n"
+                    f"```\n{func_code}\n```\n\n"
+                    f"只输出实现后的完整函数代码（从def开始）。\n"
+                    f"保持原始缩进和签名不变，只替换pass为实现。\n"
+                    f"纯代码，无markdown，无解释。"
+                    f"{test_info}"
+                )
+
+                if ctx.search_results:
+                    prompt += f"\n\n参考资料：\n{ctx.search_results[:500]}"
+
+                system = self._build_system(ctx)
+
+                raw = self.llm.generate(prompt=prompt, system=system, max_tokens=2048, temperature=0.0)
+                self._log_llm_call(ctx, f"generator_stub_{func_name}", prompt, system, raw)
+                modified = self._clean_code_output(raw)
+
+                if modified and modified.strip() != func_code.strip():
+                    modified = modified.strip("\n")
+                    modified = self._align_indentation(func_code, modified)
+                    file_patches.append({
+                        "file": fpath,
+                        "original": func_code,
+                        "modified": modified,
+                    })
+                    explanation_parts.append(f"{fpath}:{func_name}")
+
+            if file_patches:
+                patches.extend(file_patches)
+
+        if not patches:
+            logger.debug("Stub decomposition produced no patches, falling back to whole_file")
+            return self._run_whole_file(ctx, files)
+
+        result = {
+            "patches": patches,
+            "explanation": f"Stub impl: {', '.join(explanation_parts)}",
+        }
+        ctx.generator_output = result
+        return result
+
+    @staticmethod
+    def _find_stub_functions(content: str) -> list[tuple[str, str]]:
+        """
+        Find all stub functions (body is just 'pass', '...', or 'return None') in file content.
+        Returns list of (func_name, full_function_code) tuples.
+        """
+        lines = content.split("\n")
+        stubs = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.lstrip()
+            if stripped.startswith("def "):
+                func_name = stripped[4:].split("(")[0].strip()
+                indent_level = len(line) - len(stripped)
+                start_idx = i
+
+                # Find end of function
+                end_idx = i + 1
+                while end_idx < len(lines):
+                    l = lines[end_idx]
+                    if l.strip() == "":
+                        end_idx += 1
+                        continue
+                    current_indent = len(l) - len(l.lstrip())
+                    if current_indent <= indent_level and l.strip():
+                        break
+                    end_idx += 1
+
+                func_code = "\n".join(lines[start_idx:end_idx]).rstrip()
+
+                # Check if body is stub (skip docstrings and comments)
+                in_docstring = False
+                clean_body = []
+                for bl in lines[start_idx + 1:end_idx]:
+                    s = bl.strip()
+                    if not s:
+                        continue
+                    if s.startswith('"""') or s.startswith("'''"):
+                        if s.count('"""') >= 2 or s.count("'''") >= 2:
+                            continue  # single-line docstring
+                        in_docstring = not in_docstring
+                        continue
+                    if in_docstring:
+                        continue
+                    if s.startswith("#"):
+                        continue
+                    clean_body.append(s)
+
+                is_stub = (
+                    len(clean_body) == 0 or
+                    (len(clean_body) == 1 and clean_body[0] in (
+                        "pass", "...", "return None",
+                        "raise NotImplementedError",
+                        "raise NotImplementedError()",
+                    ))
+                )
+
+                if is_stub:
+                    stubs.append((func_name, func_code))
+
+                i = end_idx
+            else:
+                i += 1
+
+        return stubs
