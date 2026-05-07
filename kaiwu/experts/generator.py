@@ -439,6 +439,8 @@ class GeneratorExpert:
 
         for temp in self.temperatures:
             raw = self.llm.generate(prompt=prompt, system=system, max_tokens=base_tokens, temperature=temp)
+            # 审计：记录LLM调用的输入输出
+            self._log_llm_call(ctx, "generator", prompt, system, raw)
             modified = self._clean_code_output(raw)
             if modified and modified != original:
                 return modified
@@ -474,6 +476,7 @@ class GeneratorExpert:
 
         system = self._build_system(ctx)
         raw = self.llm.generate(prompt=prompt, system=system, max_tokens=1024, temperature=0.0)
+        self._log_llm_call(ctx, "generator_hashline", prompt, system, raw)
         if not raw or not raw.strip():
             return None
 
@@ -559,6 +562,7 @@ class GeneratorExpert:
 
         system = self._build_system(ctx)
         raw = self.llm.generate(prompt=prompt, system=system, max_tokens=2048, temperature=0.0)
+        self._log_llm_call(ctx, "generator_codegen", prompt, system, raw)
         code = self._clean_code_output(raw)
         if not code:
             return None
@@ -629,6 +633,7 @@ class GeneratorExpert:
 
         system = self._build_system(ctx)
         raw = self.llm.generate(prompt=prompt, system=system, max_tokens=2048, temperature=0.0)
+        self._log_llm_call(ctx, "generator_codegen", prompt, system, raw)
         code = self._clean_code_output(raw)
         if not code:
             return None
@@ -831,6 +836,26 @@ class GeneratorExpert:
         lower = user_input.lower()
         return any(kw in lower for kw in keywords)
 
+    def _log_llm_call(self, ctx: TaskContext, caller: str,
+                      prompt: str, system: str, raw_output: str):
+        """记录LLM调用到审计日志（通过orchestrator的_audit实例）。"""
+        try:
+            # 通过ctx找到orchestrator的audit logger
+            audit = getattr(ctx, '_audit_logger', None)
+            if audit and hasattr(audit, 'log_llm_call'):
+                prompt_tokens = len(prompt) // 4 + len(system) // 4  # 粗估
+                output_tokens = len(raw_output or '') // 4
+                audit.log_llm_call(
+                    caller=caller,
+                    prompt_tokens=prompt_tokens,
+                    prompt_preview=prompt[:500],
+                    raw_output=(raw_output or '')[:500],
+                    output_tokens=output_tokens,
+                    engineering_actions={},
+                )
+        except Exception:
+            pass  # 非阻塞
+
     def _run_whole_file(self, ctx: TaskContext, files: list[str]) -> Optional[dict]:
         """whole_file scope：LLM返回完整文件内容，直接write_file，不走apply_patch。"""
         patches = []
@@ -870,6 +895,7 @@ class GeneratorExpert:
             system = self._build_system(ctx)
 
             raw = self.llm.generate(prompt=prompt, system=system, max_tokens=4096, temperature=0.0)
+            self._log_llm_call(ctx, "generator_whole_file", prompt, system, raw)
             code = self._clean_code_output(raw)
             if not code or code == content:
                 continue

@@ -199,6 +199,8 @@ class PipelineOrchestrator:
             kaiwu_memory=self.memory.load(project_root),
             expert_system_prompt=gate_result.get("system_prompt", ""),
         )
+        # 注入审计日志引用，让Generator等专家能记录LLM调用
+        ctx._audit_logger = self._audit
 
         # 模型能力等级注入ctx
         ctx.model_tier = self._model_tier.value

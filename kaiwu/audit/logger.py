@@ -30,17 +30,19 @@ MAX_LOGS = 100
 
 
 class AuditLogger:
-    """任务执行审计日志（增强版：含MoE决策轨迹）。"""
+    """任务执行审计日志（增强版：含完整信息传递路径）。"""
 
     def __init__(self):
         self._events: list[dict] = []
         self._iterations: list[dict] = []
+        self._llm_calls: list[dict] = []  # LLM调用记录
         self._start_time: float = 0
 
     def start(self):
         """任务开始时调用。"""
         self._events = []
         self._iterations = []
+        self._llm_calls = []
         self._start_time = time.time()
 
     def log(self, stage: str, detail: str):
@@ -51,6 +53,28 @@ class AuditLogger:
             "elapsed_s": round(elapsed, 1),
             "stage": stage,
             "detail": detail,
+        })
+
+    def log_llm_call(self, caller: str, prompt_tokens: int,
+                     prompt_preview: str, raw_output: str,
+                     output_tokens: int = 0,
+                     engineering_actions: Optional[dict] = None):
+        """
+        记录一次LLM调用的完整输入输出。
+        caller: 谁调用的（generator/reviewer/gate/reflection）
+        prompt_preview: prompt前500字符
+        raw_output: LLM原始输出前500字符
+        engineering_actions: 工程层做了什么处理
+        """
+        self._llm_calls.append({
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "elapsed_s": round(time.time() - self._start_time, 1) if self._start_time else 0,
+            "caller": caller,
+            "prompt_tokens": prompt_tokens,
+            "prompt_preview": prompt_preview[:500],
+            "raw_output": raw_output[:500],
+            "output_tokens": output_tokens,
+            "engineering_actions": engineering_actions or {},
         })
 
     def log_iteration(self, attempt: int, gap_type: str = "",
@@ -140,6 +164,34 @@ class AuditLogger:
                 "events": self._events,
                 # TraceCoder: 完整历史教训链
                 "attempt_history": getattr(ctx, 'attempt_history', []),
+                # 完整信息传递路径：LLM看到了什么、输出了什么、工程做了什么
+                "llm_calls": self._llm_calls,
+                # 各节点输入输出快照
+                "node_io": {
+                    "locator_input": {
+                        "user_input": ctx.user_input[:200],
+                        "gap_type": initial_gap_type,
+                        "gap_functions": ctx.gap.functions if ctx.gap and hasattr(ctx.gap, 'functions') else [],
+                        "gap_files": ctx.gap.files if ctx.gap and hasattr(ctx.gap, 'files') else [],
+                    },
+                    "locator_output": {
+                        "files": (ctx.locator_output or {}).get("relevant_files", []),
+                        "functions": (ctx.locator_output or {}).get("relevant_functions", []),
+                        "method": (ctx.locator_output or {}).get("method", ""),
+                    } if ctx.locator_output else None,
+                    "generator_output": {
+                        "patch_count": len(patches),
+                        "write_mode": patches[0].get("write_mode", "patch") if patches else "",
+                        "files": files_modified,
+                    } if patches else None,
+                    "verifier_output": {
+                        "passed": ctx.verifier_output.get("passed", False),
+                        "tests_passed": tests_passed,
+                        "tests_total": tests_total,
+                        "error_type": ctx.verifier_output.get("error_type", ""),
+                        "structured_failures": ctx.verifier_output.get("structured_failures", [])[:5],
+                    } if ctx.verifier_output else None,
+                },
             }
 
             log_path = log_dir / filename

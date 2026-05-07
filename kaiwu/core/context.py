@@ -107,3 +107,6 @@ class TaskContext:
 
     # 错误类型连续计数（用于熔断）
     _error_type_streak: dict = field(default_factory=lambda: {"type": "", "count": 0})
+
+    # 审计日志引用（Generator等专家通过此记录LLM调用）
+    _audit_logger: "Any" = None
