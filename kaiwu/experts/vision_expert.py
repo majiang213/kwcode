@@ -217,17 +217,17 @@ class VisionExpert:
         return None
 
     def _is_codegen_task(self, user_input: str) -> bool:
-        """判断是否为代码生成任务"""
+        """判断是否为代码生成任务。单独动词不触发。"""
         codegen_keywords = [
-            "生成代码", "写代码", "实现", "创建", "生成",
-            "代码", "函数", "类", "组件", "页面",
-            "generate", "create", "implement", "code",
+            "生成代码", "写代码", "写页面", "实现", "创建", "build a", "generate code",
+            "write code", "implement", "create a",
             "html", "css", "javascript", "python", "react", "vue"
         ]
-        
-        # 检查是否包含代码相关关键词
-        user_input_lower = user_input.lower()
-        return any(kw in user_input_lower for kw in codegen_keywords)
+        single_reject = ["生成"]
+        inp = user_input.lower().strip()
+        if inp in single_reject:
+            return False
+        return any(kw in inp for kw in codegen_keywords)
 
     def _run_analysis(self, ctx: TaskContext, images: list[dict]) -> dict:
         """运行图片分析"""
@@ -319,7 +319,10 @@ class VisionExpert:
 
     @staticmethod
     def _vision_api_configured() -> bool:
-        return bool(os.environ.get("KWCODE_VISION_API_URL") or os.environ.get("KWCODE_VISION_API_KEY"))
+        """URL和model都要有才算配置好。"""
+        url = os.environ.get("KWCODE_VISION_API_URL", "")
+        model = os.environ.get("KWCODE_VISION_MODEL", "")
+        return bool(url and model)
 
     def _try_llm_vision(self, system_prompt: str, user_prompt: str, images: list[dict]) -> str:
         """尝试通过 self.llm 的 chat 接口发送多模态请求"""
@@ -450,9 +453,19 @@ class VisionExpert:
         return "\n".join(text_parts) if text_parts else "[VisionExpert] 模型未返回文本内容"
 
     def _should_execute_code(self, user_input: str) -> bool:
-        """判断是否应该执行生成的代码"""
-        execute_keywords = ["执行", "运行", "测试", "run", "execute", "test"]
-        return any(kw in user_input.lower() for kw in execute_keywords)
+        """判断是否应该执行生成的代码。排除单词级别的误触发。"""
+        execute_keywords = ["执行代码", "运行代码", "run code", "execute code", "test code",
+                           "执行.*代码", "运行.*代码", "execute the code", "run the code"]
+        single_word_reject = ["执行", "运行", "run"]
+        inp = user_input.lower().strip()
+        if inp in single_word_reject:
+            return False
+        # 包含"代码/code"且包含执行动词
+        has_code = "代码" in inp or "code" in inp
+        has_exec_verb = any(v in inp for v in ["执行", "运行", "run", "execute", "test"])
+        if has_code and has_exec_verb:
+            return True
+        return any(kw in inp for kw in ["执行代码", "运行代码", "run code", "execute code", "test code"])
 
     def _execute_generated_code(self, code: str) -> Optional[str]:
         """执行生成的代码"""
