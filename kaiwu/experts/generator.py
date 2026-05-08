@@ -434,17 +434,10 @@ class GeneratorExpert:
                     lines.append(f"- {name}: {snippet[:100]}" if snippet else f"- {name}")
                 prompt += "\n\n" + "\n".join(lines)
 
-        # 透传pre_test的FAILURES原始输出（首次和retry都加）
-        test_output = initial_failure or ""
-        if test_output:
-            if "FAILURES" in test_output:
-                test_failure_info = test_output[test_output.index("FAILURES"):]
-            elif "FAILED" in test_output:
-                test_failure_info = test_output[-500:]
-            else:
-                test_failure_info = ""
-            if test_failure_info:
-                prompt += f"\n\n## 测试失败详情\n{test_failure_info[:1500]}"
+        # 透传pre_test的失败原始输出（首次和retry都加）
+        test_failure = getattr(ctx, 'initial_test_failure', '') or ''
+        if test_failure:
+            prompt += f"\n\n## 当前测试失败详情\n{test_failure[-2000:]}\n"
 
         # Inject retry_hint: 只传一句话总结，不传完整历史
         if ctx.retry_hint:
@@ -562,8 +555,8 @@ class GeneratorExpert:
 
         # 注入初始测试失败信息
         initial_failure = getattr(ctx, 'initial_test_failure', '')
-        if initial_failure and ctx.retry_count == 0:
-            prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
+        if initial_failure:
+            prompt += f"\n\n## 当前测试失败详情\n{initial_failure[-2000:]}\n"
 
         if ctx.retry_hint:
             prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
