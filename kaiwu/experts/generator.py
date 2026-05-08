@@ -983,8 +983,8 @@ class GeneratorExpert:
 
             # 注入初始测试失败信息
             initial_failure = getattr(ctx, 'initial_test_failure', '')
-            if initial_failure and ctx.retry_count == 0:
-                prompt += f"\n\n## 当前测试失败\n{initial_failure[:500]}"
+            if initial_failure:
+                prompt += f"\n\n## 当前测试失败详情\n{initial_failure[-2000:]}\n"
 
             if ctx.retry_hint:
                 prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
