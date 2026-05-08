@@ -35,6 +35,8 @@ class TaskTrajectory:
     timestamp: str = ""
     search_triggered: bool = False
     project_hash: str = ""
+    # 每次attempt的详细记录（诊断用）
+    attempts: list[dict] = field(default_factory=list)
 
 
 class TrajectoryCollector:
@@ -66,6 +68,9 @@ class TrajectoryCollector:
         if ctx.generator_output and "patches" in ctx.generator_output:
             files_modified = [p.get("file", "") for p in ctx.generator_output["patches"] if p.get("file")]
 
+        # 收集详细attempts记录（从ctx._trajectory_attempts，orchestrator填充）
+        attempts = getattr(ctx, '_trajectory_attempts', [])
+
         traj = TaskTrajectory(
             task_id=str(uuid.uuid4()),
             user_input=ctx.user_input,
@@ -85,6 +90,7 @@ class TrajectoryCollector:
             timestamp=datetime.now(timezone.utc).isoformat(),
             search_triggered=ctx.search_triggered,
             project_hash=hashlib.sha256(ctx.project_root.encode()).hexdigest()[:16],
+            attempts=attempts,
         )
 
         path = os.path.join(self._dir, f"{traj.task_id}.json")

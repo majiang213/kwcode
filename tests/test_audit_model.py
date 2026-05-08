@@ -21,29 +21,34 @@ class TestAuditLogger(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmpdir)
 
-    @patch("kaiwu.audit.logger.LOGS_DIR")
-    def test_write_creates_log(self, mock_dir):
-        mock_dir.__class__ = type(self.logs_dir)
+    def test_write_creates_log(self):
         from kaiwu.audit.logger import AuditLogger
-        with patch("kaiwu.audit.logger.LOGS_DIR", self.logs_dir):
+        success_dir = self.logs_dir / "success"
+        failed_dir = self.logs_dir / "failed"
+        with patch("kaiwu.audit.logger.LOGS_SUCCESS", success_dir), \
+             patch("kaiwu.audit.logger.LOGS_FAILED", failed_dir):
             logger = AuditLogger()
             logger.start()
             logger.log("gate", "locator_repair | 难度：easy")
             logger.log("locator", "读取 test.py")
 
-            # Mock context
+            # Mock context — need real values for fields accessed by write()
             ctx = MagicMock()
             ctx.user_input = "修复login函数"
             ctx.gate_result = {"expert_type": "locator_repair", "difficulty": "easy"}
             ctx.generator_output = {"patches": [{"file": "test.py", "original": "old", "modified": "new"}]}
-            ctx.verifier_output = {"tests_passed": 3, "tests_total": 3}
+            ctx.verifier_output = {"tests_passed": 3, "tests_total": 3, "passed": True, "error_type": "", "structured_failures": []}
             ctx.retry_count = 0
             ctx.search_triggered = False
+            ctx.gap = None
+            ctx.locator_output = None
+            ctx.routing_source = ""
+            ctx.attempt_history = []
 
             logger.write(ctx, 5.2, True, "qwen3:8b")
 
             # Verify log file created
-            logs = list(self.logs_dir.glob("*.json"))
+            logs = list(success_dir.glob("*.json"))
             assert len(logs) == 1
 
             data = json.loads(logs[0].read_text(encoding="utf-8"))
@@ -53,46 +58,56 @@ class TestAuditLogger(unittest.TestCase):
             assert len(data["events"]) == 2
             assert data["files_modified"] == ["test.py"]
 
-    @patch("kaiwu.audit.logger.LOGS_DIR")
-    def test_list_logs(self, mock_dir):
+    def test_list_logs(self):
         from kaiwu.audit.logger import list_logs
-        with patch("kaiwu.audit.logger.LOGS_DIR", self.logs_dir):
-            self.logs_dir.mkdir(parents=True, exist_ok=True)
+        success_dir = self.logs_dir / "success"
+        failed_dir = self.logs_dir / "failed"
+        legacy_dir = self.logs_dir / "legacy"
+        with patch("kaiwu.audit.logger.LOGS_SUCCESS", success_dir), \
+             patch("kaiwu.audit.logger.LOGS_FAILED", failed_dir), \
+             patch("kaiwu.audit.logger.LOGS_LEGACY", legacy_dir):
+            success_dir.mkdir(parents=True, exist_ok=True)
 
             # Write 3 log files with distinct names
             for i in range(3):
                 record = {"task": f"task {i}", "success": True, "elapsed_s": 1.0,
                            "timestamp": f"2026-05-06T10:00:0{i}", "model": "test"}
-                (self.logs_dir / f"2026-05-06_10000{i}_codegen.json").write_text(
+                (success_dir / f"2026-05-06_10000{i}_codegen.json").write_text(
                     json.dumps(record), encoding="utf-8"
                 )
 
             logs = list_logs(limit=10)
             assert len(logs) == 3
 
-    @patch("kaiwu.audit.logger.LOGS_DIR")
-    def test_clear_logs(self, mock_dir):
+    def test_clear_logs(self):
         from kaiwu.audit.logger import AuditLogger, clear_logs
-        with patch("kaiwu.audit.logger.LOGS_DIR", self.logs_dir):
-            self.logs_dir.mkdir(parents=True, exist_ok=True)
-            (self.logs_dir / "test.json").write_text("{}", encoding="utf-8")
+        success_dir = self.logs_dir / "success"
+        failed_dir = self.logs_dir / "failed"
+        legacy_dir = self.logs_dir / "legacy"
+        with patch("kaiwu.audit.logger.LOGS_SUCCESS", success_dir), \
+             patch("kaiwu.audit.logger.LOGS_FAILED", failed_dir), \
+             patch("kaiwu.audit.logger.LOGS_LEGACY", legacy_dir):
+            success_dir.mkdir(parents=True, exist_ok=True)
+            (success_dir / "test.json").write_text("{}", encoding="utf-8")
             count = clear_logs()
             assert count == 1
-            assert len(list(self.logs_dir.glob("*.json"))) == 0
+            assert len(list(success_dir.glob("*.json"))) == 0
 
-    @patch("kaiwu.audit.logger.LOGS_DIR")
-    def test_max_logs_cleanup(self, mock_dir):
+    def test_max_logs_cleanup(self):
         from kaiwu.audit.logger import AuditLogger, MAX_LOGS
-        with patch("kaiwu.audit.logger.LOGS_DIR", self.logs_dir):
-            self.logs_dir.mkdir(parents=True, exist_ok=True)
+        success_dir = self.logs_dir / "success"
+        with patch("kaiwu.audit.logger.LOGS_SUCCESS", success_dir), \
+             patch("kaiwu.audit.logger.LOGS_FAILED", self.logs_dir / "failed"), \
+             patch("kaiwu.audit.logger.LOGS_LEGACY", self.logs_dir / "legacy"):
+            success_dir.mkdir(parents=True, exist_ok=True)
             # Create MAX_LOGS + 5 files
             for i in range(MAX_LOGS + 5):
-                (self.logs_dir / f"2026-01-01_{i:06d}_test.json").write_text("{}", encoding="utf-8")
+                (success_dir / f"2026-01-01_{i:06d}_test.json").write_text("{}", encoding="utf-8")
 
             al = AuditLogger()
-            al._cleanup()
+            al._cleanup(success_dir)
 
-            remaining = list(self.logs_dir.glob("*.json"))
+            remaining = list(success_dir.glob("*.json"))
             assert len(remaining) == MAX_LOGS
 
 

@@ -241,6 +241,8 @@ class PipelineOrchestrator:
 
         # 错误类型追踪
         ctx._errors_encountered = []
+        # 详细attempt记录（供trajectory_collector使用）
+        ctx._trajectory_attempts = []
 
         # 每次顶层任务重置manifest
         self._manifest.clear()
@@ -458,6 +460,13 @@ class PipelineOrchestrator:
                 "error_message": (ctx.verifier_output or {}).get("error_message", "")[:200],
             }
             ctx.attempt_history.append(attempt_record)
+
+            # ── Trajectory详细attempt记录（诊断用） ──
+            try:
+                _traj_attempt = self._build_trajectory_attempt(ctx, current_error_type)
+                ctx._trajectory_attempts.append(_traj_attempt)
+            except Exception:
+                pass  # 记录失败不影响主流程
 
             # 快速熔断：语法错误重试无效
             # syntax熔断按tier区分：SMALL立刻熔断，MEDIUM/LARGE多给一次
@@ -1235,3 +1244,83 @@ class PipelineOrchestrator:
             )
         except Exception:
             return ctx.gap or Gap(GapType.UNKNOWN, 0.3, [], [], "", "")
+
+    def _build_trajectory_attempt(self, ctx: TaskContext, error_type: str) -> dict:
+        """构建单次attempt的详细诊断记录（供trajectory.json使用）。
+
+        所有字段try-except保护，单字段失败不影响其他字段。
+        字符串字段截断到合理长度（≤500字）。
+        """
+        attempt = {"attempt": ctx.retry_count - 1}  # retry_count已+1，这里记录的是刚完成的attempt
+
+        # LLM输入输出（从audit logger的llm_calls取最近一条）
+        try:
+            llm_calls = self._audit._llm_calls
+            if llm_calls:
+                last_call = llm_calls[-1]
+                attempt["llm_prompt_tail"] = (last_call.get("prompt_preview", "") or "")[-400:]
+                attempt["llm_raw_output"] = (last_call.get("raw_output", "") or "")[:400]
+                attempt["llm_caller"] = last_call.get("caller", "")
+            else:
+                attempt["llm_prompt_tail"] = ""
+                attempt["llm_raw_output"] = ""
+                attempt["llm_caller"] = ""
+        except Exception:
+            attempt["llm_prompt_tail"] = ""
+            attempt["llm_raw_output"] = ""
+            attempt["llm_caller"] = ""
+
+        # patch生成结果
+        try:
+            patches = (ctx.generator_output or {}).get("patches", [])
+            attempt["patches_count"] = len(patches)
+        except Exception:
+            attempt["patches_count"] = 0
+
+        # patch apply结果
+        try:
+            v = ctx.verifier_output or {}
+            if v.get("error_type") == "patch_apply":
+                attempt["patch_apply_ok"] = False
+                attempt["patch_apply_error"] = (v.get("error_message", "") or v.get("error_detail", ""))[:300]
+            elif v:
+                # verifier跑到了测试阶段，说明apply成功了
+                attempt["patch_apply_ok"] = True
+                attempt["patch_apply_error"] = ""
+            else:
+                attempt["patch_apply_ok"] = False
+                attempt["patch_apply_error"] = "no verifier output"
+        except Exception:
+            attempt["patch_apply_ok"] = False
+            attempt["patch_apply_error"] = ""
+
+        # 修改行数
+        try:
+            patches = (ctx.generator_output or {}).get("patches", [])
+            modified_lines = 0
+            for p in patches:
+                orig = p.get("original", "") or ""
+                mod = p.get("modified", "") or p.get("content", "") or ""
+                modified_lines += abs(len(mod.splitlines()) - len(orig.splitlines()))
+            attempt["modified_lines"] = modified_lines
+        except Exception:
+            attempt["modified_lines"] = 0
+
+        # verifier测试结果
+        try:
+            v = ctx.verifier_output or {}
+            attempt["tests_passed"] = v.get("tests_passed", 0)
+            attempt["tests_total"] = v.get("tests_total", 0)
+            attempt["test_output_tail"] = (v.get("error_detail", "") or "")[-300:]
+        except Exception:
+            attempt["tests_passed"] = 0
+            attempt["tests_total"] = 0
+            attempt["test_output_tail"] = ""
+
+        # 错误类型
+        try:
+            attempt["error_type"] = error_type or ""
+        except Exception:
+            attempt["error_type"] = ""
+
+        return attempt
