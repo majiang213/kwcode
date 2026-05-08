@@ -894,6 +894,8 @@ class PipelineOrchestrator:
                     self._detailed.log_node("verifier",
                         {"patch_count": len((ctx.generator_output or {}).get("patches", []))},
                         {"passed": False, "error_type": result.get("error_type", "") if result else "", "error_detail": detail[:1000], "tests_passed": result.get("tests_passed", 0) if result else 0, "tests_total": result.get("tests_total", 0) if result else 0})
+                    # ── 不退步保护：verifier失败时检查是否退步 ──
+                    self._regression_guard(ctx, result, on_status)
                     return False
                 tp = result.get("tests_passed", 0)
                 tt = result.get("tests_total", 0)
@@ -901,6 +903,8 @@ class PipelineOrchestrator:
                 self._detailed.log_node("verifier",
                     {"patch_count": len((ctx.generator_output or {}).get("patches", []))},
                     {"passed": True, "tests_passed": tp, "tests_total": tt})
+                # ── 不退步保护：成功时更新最优快照 ──
+                self._regression_guard(ctx, result, on_status)
 
             elif step == "office":
                 self._emit(on_status, "office", "生成Office文档...")
@@ -1169,6 +1173,23 @@ class PipelineOrchestrator:
         if failed_tests:
             hint += "\n\n仍然失败的测试：\n" + "\n".join(f"  - {t}" for t in failed_tests[:5])
 
+        # structured_failures精确传递：具体哪个测试失败、期望什么、实际什么
+        try:
+            from kaiwu.core.test_parser import parse_test_failures
+            error_detail = (ctx.verifier_output or {}).get("error_detail", "")
+            if error_detail:
+                failures = parse_test_failures(error_detail)
+                if failures:
+                    hint += "\n\n还在失败的具体测试：\n"
+                    for f in failures[:4]:
+                        hint += (
+                            f"- {f['test_name']}: "
+                            f"期望{f.get('expected', '?')}，"
+                            f"实际{f.get('actual', '?')}\n"
+                        )
+        except Exception:
+            pass  # 非阻塞
+
         # TraceCoder: 携带历史教训摘要（20+20=40效果）
         if ctx.attempt_history:
             lessons = []
@@ -1324,3 +1345,52 @@ class PipelineOrchestrator:
             attempt["error_type"] = ""
 
         return attempt
+
+    def _regression_guard(self, ctx: TaskContext, ver_result: dict, on_status):
+        """不退步保护：如果测试通过数退步，回滚到最优状态；否则更新快照。
+
+        非阻塞，失败静默。
+        """
+        if not ver_result:
+            return
+        try:
+            new_passed = ver_result.get("tests_passed", 0)
+            # 获取本次修改的文件列表
+            modified_files = []
+            if ctx.generator_output:
+                for p in ctx.generator_output.get("patches", []):
+                    f = p.get("file", "")
+                    if f:
+                        modified_files.append(f)
+
+            if new_passed < ctx.best_tests_passed and ctx.best_code_snapshot:
+                # 退步了，回滚到最优状态
+                for fname, content in ctx.best_code_snapshot.items():
+                    try:
+                        self.tools.write_file(fname, content)
+                    except Exception:
+                        pass
+                failing_tests = ver_result.get("failed_tests", [])
+                self._emit(on_status, "regression_guard",
+                    f"新patch退步（{new_passed}<{ctx.best_tests_passed}），已回滚到最优状态")
+                ctx.retry_hint = (
+                    f"上次修改后只有{new_passed}个测试通过，"
+                    f"比之前的{ctx.best_tests_passed}个更少。\n"
+                    f"还在失败的测试：{failing_tests[:3]}"
+                )
+            else:
+                # 进步了或持平，更新最优状态
+                ctx.best_tests_passed = new_passed
+                if modified_files:
+                    snapshot = {}
+                    for f in modified_files:
+                        try:
+                            content = self.tools.read_file(f)
+                            if not content.startswith("[ERROR]"):
+                                snapshot[f] = content
+                        except Exception:
+                            pass
+                    if snapshot:
+                        ctx.best_code_snapshot = snapshot
+        except Exception as e:
+            logger.debug("Regression guard failed (non-blocking): %s", e)

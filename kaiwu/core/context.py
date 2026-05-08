@@ -105,6 +105,10 @@ class TaskContext:
     # shape: [{"attempt": 1, "passed_tests": [...], "failed_tests": [...],
     #          "error_type": "...", "patch_summary": "...", "lesson": "..."}]
 
+    # ── 不退步保护（Regression Guard） ──
+    best_tests_passed: int = 0
+    best_code_snapshot: dict = field(default_factory=dict)  # {filename: content}
+
     # 错误类型连续计数（用于熔断）
     _error_type_streak: dict = field(default_factory=lambda: {"type": "", "count": 0})
 
