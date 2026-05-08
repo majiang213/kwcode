@@ -379,6 +379,7 @@ class GeneratorExpert:
             result = self._try_hashline(ctx, fpath, original, task_desc, search_ctx)
             if result:
                 return result
+            # Hashline失败，静默fallback到full-function（不消耗retry次数）
             logger.debug("Hashline failed, falling back to full-function generation")
 
         # ── Fallback: full function generation ──

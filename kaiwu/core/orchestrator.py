@@ -594,6 +594,17 @@ class PipelineOrchestrator:
         _watchdog.cancel()  # Clean up watchdog timer
         elapsed = time.time() - start_time
 
+        # ── 不退步保护闭环：任务失败时把最优中间状态写回磁盘 ──
+        # 不受KWCODE_NO_RESTORE影响（这是主动保留最优，不是还原checkpoint）
+        if ctx.best_tests_passed > 0 and ctx.best_code_snapshot:
+            for fname, content in ctx.best_code_snapshot.items():
+                try:
+                    self.tools.write_file(fname, content)
+                except Exception:
+                    pass
+            self._emit(on_status, "best_state_restored",
+                f"最终保留最优状态：{ctx.best_tests_passed}个测试通过")
+
         return self._record_failure_result(ctx, project_root, gate_result,
                                            ab_candidate_name, ab_used_new, max_retries,
                                            elapsed, checkpoint, checkpoint_saved, on_status)
