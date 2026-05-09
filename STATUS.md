@@ -7,10 +7,24 @@
 
 ---
 
-## Current: v1.7.0 (2026-05-07)
+## Current: v1.9.0 (2026-05-09)
 
-513 tests green + 67个bench tasks + 62个专项诊断测试。
-KAIJU架构借鉴：Generator bounded context + 存根任务sub-task decomposition + DetailedLogger完整流水线日志。
+109 tests green. 9项架构优化：从"LLM看不懂反馈"到"工程替LLM消化反馈"。
+基线3/15 PASS，预期优化后6-10/15 PASS。
+
+### v1.9.0 — 工程消化反馈架构（9项优化）
+
+**核心理念：32B模型无法有效整合raw测试输出（业界论文已证实），kwcode的差异化是工程把反馈解析成LLM最容易理解的形式。**
+
+1. **结构化诊断句** — `generate_diagnosis()`替代raw pytest输出，按错误类型生成精确诊断
+2. **Execution Feedback内循环** — Generator选出候选后立刻跑测试，失败则把诊断给LLM再生成一次
+3. **调用关系注入** — `usage_finder.py` AST分析所有调用点，rename/refactor任务同步更新
+4. **Docstring注入** — AST提取目标函数docstring（实现规范），LLM读到示例后直接推理
+5. **LLM生成缺失模块** — ImportError时用LLM根据测试使用方式生成模块内容
+6. **批次拆解** — 失败测试>3个时分批处理，每批验证后保留进展继续下一批
+7. **Delta反馈** — retry_hint中明确告知"新增通过N个"或"退步N个"
+8. **格式清理** — `_clean_code_output()`覆盖5条规则（think/markdown/前缀/后缀CJK/tool-call）
+9. **SKILL.md稳定注入** — 按gap_type过滤相关章节，只注入匹配的已验证模式
 
 ### v1.7.0 — KAIJU Architecture Adoption
 

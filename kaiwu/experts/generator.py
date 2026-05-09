@@ -228,6 +228,13 @@ class GeneratorExpert:
         # 需要整文件scope的任务：重构（提取函数/拆分类）或综合任务（bug+refactor）
         # 判断条件：任务需要新增类/函数，或测试要求代码行数缩短/拆分
         if self._needs_whole_file_scope(ctx, files, funcs):
+            # 多bug任务逐bug拆解（首次attempt，多个失败测试）
+            initial_failure = getattr(ctx, 'initial_test_failure', '') or ''
+            if ctx.best_tests_passed == 0 and self._count_distinct_bugs(initial_failure) >= 4:
+                result = self._run_bug_decomposed(ctx, files)
+                if result:
+                    return result
+                # fallback到whole_file_refactor
             # Retry时用targeted_fix（基于当前磁盘状态，带函数级定位）
             if ctx.best_tests_passed > 0:
                 return self._run_targeted_fix(ctx, files)
@@ -444,9 +451,16 @@ class GeneratorExpert:
                     lines.append(f"- {name}: {snippet[:100]}" if snippet else f"- {name}")
                 prompt += "\n\n" + "\n".join(lines)
 
-        # 透传pre_test的失败原始输出（首次和retry都加）
+        # 透传pre_test的失败信息：优先用诊断句，fallback到原始输出
         test_failure = getattr(ctx, 'initial_test_failure', '') or ''
-        if test_failure:
+        if structured:
+            from kaiwu.core.test_parser import generate_diagnosis
+            diagnosis = generate_diagnosis(structured)
+            if diagnosis:
+                prompt += f"\n\n## 需要修复的问题（精确诊断）\n{diagnosis}\n"
+            elif test_failure:
+                prompt += f"\n\n## 当前测试失败详情\n{test_failure[-2000:]}\n"
+        elif test_failure:
             prompt += f"\n\n## 当前测试失败详情\n{test_failure[-2000:]}\n"
 
         # Inject retry_hint: 只传一句话总结，不传完整历史
@@ -1141,10 +1155,12 @@ class GeneratorExpert:
 
         combined_test_info = initial_failure + '\n' + verifier_detail
 
-        # 信号1：测试要求导入新类/函数或新模块
+        # 信号1：测试要求导入新类/函数或新模块 → 可能需要创建新文件
         if 'cannot import name' in combined_test_info:
             return True
         if 'ModuleNotFoundError' in combined_test_info or 'module_exists' in combined_test_info:
+            # 检测是否需要创建新文件
+            self._maybe_create_missing_module(ctx, combined_test_info)
             return True
 
         # 信号2：测试要求代码行数缩短（refactoring test）
@@ -1266,11 +1282,33 @@ class GeneratorExpert:
                 prompt += f"\n\n## Bug定位（重点修复这些函数）\n" + "\n".join(hints) + "\n"
 
             # D步骤：只注入当前文件相关的失败测试（不是全部FAILURES）
-            # 失败批次控制：每次最多给3个失败，避免LLM被太多失败淹没输出分析文本
+            # 优先用诊断句（LLM更容易理解），fallback到原始snippet
+            from kaiwu.core.test_parser import parse_test_failures, generate_diagnosis
             file_specific_failures = file_failures.get(fpath, [])
             unattributed = file_failures.get('__unattributed__', [])
-            if file_specific_failures:
-                # 最多3个失败，让LLM专注修复而非分析
+
+            # 尝试从file_specific_failures中提取结构化信息生成诊断句
+            structured_for_file = parse_test_failures("\n".join(file_specific_failures)) if file_specific_failures else []
+            if not structured_for_file and initial_failure:
+                # fallback: 从全局initial_failure解析，再按文件过滤
+                all_structured = parse_test_failures(initial_failure)
+                import os
+                fbase = os.path.basename(fpath)
+                structured_for_file = [
+                    f for f in all_structured
+                    if f.get('file', '') == fbase or fbase.replace('.py', '') in f.get('test_name', '').lower()
+                ][:5]
+
+            if structured_for_file:
+                diagnosis = generate_diagnosis(structured_for_file)
+                if diagnosis:
+                    prompt += f"\n\n## 当前文件 {fpath} 需要修复的问题（精确诊断）\n{diagnosis}\n"
+                elif file_specific_failures:
+                    batch = file_specific_failures[:3]
+                    failures_text = "\n\n".join(batch)
+                    prompt += f"\n\n## 当前文件 {fpath} 需要修复的测试失败（共{len(file_specific_failures)}个，先修这{len(batch)}个）\n{failures_text}\n"
+            elif file_specific_failures:
+                # 失败批次控制：每次最多给3个失败，避免LLM被太多失败淹没输出分析文本
                 batch = file_specific_failures[:3]
                 failures_text = "\n\n".join(batch)
                 prompt += f"\n\n## 当前文件 {fpath} 需要修复的测试失败（共{len(file_specific_failures)}个，先修这{len(batch)}个）\n{failures_text}\n"
@@ -1280,6 +1318,10 @@ class GeneratorExpert:
             elif initial_failure:
                 # 没有归因结果时fallback到原始行为（取末尾）
                 prompt += f"\n\n## 当前测试失败详情\n{initial_failure[-2500:]}\n"
+
+            # Docstring注入：让LLM看到函数的实现规范
+            target_funcs = [ff['function'] for ff in fault_funcs[:3]] if fault_funcs else []
+            prompt = self._inject_docstrings(prompt, content, target_funcs)
 
             if ctx.retry_hint:
                 prompt += f"\n\n## 重试提示\n{ctx.retry_hint}"
@@ -1291,17 +1333,117 @@ class GeneratorExpert:
             else:
                 system = self._build_system(ctx)
 
-            # 代码生成：使用temperature=0.0确保稳定输出
-            best_code = None
-            raw = self.llm.generate(prompt=prompt, system=system, max_tokens=4096, temperature=0.0)
-            self._log_llm_call(ctx, "generator_whole_file_refactor", prompt, system, raw)
-            candidate = self._clean_code_output(raw)
-            if candidate and candidate != content and self._is_valid_syntax(candidate):
-                best_code = candidate
+            # ═══ 采样+选择机制（Agentless思路）═══
+            import ast as _ast
+            candidates = []
+            temperatures = [0.0, 0.2, 0.4]
+
+            for temp in temperatures:
+                raw = self.llm.generate(prompt=prompt, system=system, max_tokens=4096, temperature=temp)
+                self._log_llm_call(ctx, "generator_whole_file_refactor", prompt, system, raw)
+                candidate = self._clean_code_output(raw)
+                if not candidate or candidate == content:
+                    continue
+                try:
+                    _ast.parse(candidate)
+                    candidates.append((temp, candidate))
+                except SyntaxError:
+                    continue
+
+            if not candidates:
+                continue
+
+            # 如果只有1个候选直接用，多个候选用测试选最佳
+            if len(candidates) == 1:
+                best_code = candidates[0][1]
+            else:
+                best_code = candidates[0][1]
+                best_passed = -1
+                for temp, candidate_code in candidates:
+                    self.tools.write_file(fpath, candidate_code)
+                    from kaiwu.core.context import TaskContext as _TC
+                    _tmp_ctx = _TC(project_root=ctx.project_root)
+                    from kaiwu.experts.verifier import VerifierExpert as _VE
+                    _tmp_ver = _VE(self.llm, self.tools)
+                    _result = _tmp_ver.run_tests_only(_tmp_ctx)
+                    passed = _result.get("passed", 0)
+                    if passed > best_passed:
+                        best_passed = passed
+                        best_code = candidate_code
+                # 恢复原始文件
+                self.tools.write_file(fpath, content)
+
+            code = best_code
 
             if not best_code:
                 continue
             code = best_code
+
+            # ═══ 批次拆解：如果还有更多失败测试，分批继续修复 ═══
+            # 第一轮已经处理了前3个失败，如果还有更多，继续分批
+            remaining_failures = file_specific_failures[3:] if file_specific_failures else []
+            if remaining_failures and self.tools:
+                BATCH_SIZE = 3
+                batches = [remaining_failures[i:i+BATCH_SIZE]
+                           for i in range(0, len(remaining_failures), BATCH_SIZE)]
+
+                current_content = code
+                for batch_idx, batch in enumerate(batches[:2]):  # 最多再处理2批
+                    # 验证当前代码状态
+                    self.tools.write_file(fpath, current_content)
+                    from kaiwu.core.context import TaskContext as _TC
+                    from kaiwu.experts.verifier import VerifierExpert as _VE
+                    _tmp_ctx = _TC(project_root=ctx.project_root)
+                    _tmp_ver = _VE(self.llm, self.tools)
+                    _result = _tmp_ver.run_tests_only(_tmp_ctx)
+                    current_passed = _result.get("passed", 0)
+                    current_total = _result.get("total", 0)
+
+                    if current_passed == current_total and current_total > 0:
+                        break  # 全部通过，不需要继续
+
+                    # 构建下一批的prompt
+                    batch_diagnosis = generate_diagnosis(
+                        parse_test_failures("\n".join(batch))
+                    ) if batch else ""
+
+                    batch_prompt = (
+                        f"以下代码已经通过了 {current_passed}/{current_total} 个测试，"
+                        f"但还有测试失败。请继续修复。\n\n"
+                        f"任务：{ctx.user_input[:300]}\n\n"
+                        f"当前文件 {fpath} 的完整内容：\n{current_content}\n\n"
+                    )
+                    if batch_diagnosis:
+                        batch_prompt += f"## 本批需要修复的问题\n{batch_diagnosis}\n\n"
+                    else:
+                        batch_prompt += f"## 本批需要修复的测试失败\n" + "\n\n".join(batch[:3]) + "\n\n"
+                    batch_prompt += (
+                        f"输出修改后的完整文件内容。\n"
+                        f"不要改动已通过测试的代码。不要输出markdown代码块标记。"
+                    )
+
+                    raw = self.llm.generate(prompt=batch_prompt, system=system,
+                                            max_tokens=4096, temperature=0.0)
+                    batch_candidate = self._clean_code_output(raw)
+                    if batch_candidate and batch_candidate != current_content:
+                        try:
+                            _ast.parse(batch_candidate)
+                            # 验证新代码不退步
+                            self.tools.write_file(fpath, batch_candidate)
+                            _tmp_ctx2 = _TC(project_root=ctx.project_root)
+                            _result2 = _tmp_ver.run_tests_only(_tmp_ctx2)
+                            new_passed = _result2.get("passed", 0)
+                            if new_passed >= current_passed:
+                                current_content = batch_candidate
+                            else:
+                                # 退步了，恢复
+                                self.tools.write_file(fpath, current_content)
+                        except SyntaxError:
+                            pass
+
+                code = current_content
+                # 恢复原始文件（让verifier正式流程来写入最终版本）
+                self.tools.write_file(fpath, content)
 
             patches.append({
                 "file": fpath,
@@ -1453,7 +1595,8 @@ class GeneratorExpert:
     def _run_targeted_fix(self, ctx: TaskContext, files: list[str]) -> Optional[dict]:
         """基于当前磁盘文件（best_state）做targeted fix。
         与whole_file_refactor不同：读取的是当前磁盘状态（已部分修复），
-        prompt强调只修剩余失败测试，不要改动已通过的部分。"""
+        prompt强调只修剩余失败测试，不要改动已通过的部分。
+        自适应：大文件(>150行)降低采样次数和token预算，避免超时。"""
         patches = []
         explanation_parts = []
 
@@ -1475,6 +1618,15 @@ class GeneratorExpert:
             if not content or content.startswith("[ERROR]"):
                 continue
 
+            # 自适应：大文件只采1次，避免超时
+            file_lines = len(content.split('\n'))
+            if file_lines > 150:
+                max_tokens = 2048
+                temperatures = [0.0]  # 大文件只采1次，省时间给retry
+            else:
+                max_tokens = 4096
+                temperatures = [0.0, 0.2, 0.4]
+
             # D步骤增强：提取失败测试的源代码（让LLM看到expected值）
             test_code_snippet = self._extract_failing_test_code(ctx, fpath)
 
@@ -1486,6 +1638,15 @@ class GeneratorExpert:
                 hints = [f"  - {ff['function']}() (line {ff['line']}, {ff['count']}个测试指向此处)" for ff in fault_funcs[:5]]
                 fault_hint = "## Bug定位（从stack trace确定性提取）\n" + "\n".join(hints) + "\n\n"
 
+            # D步骤增强：调用关系传递（rename/refactor任务关键）
+            usage_hint = ""
+            locator = ctx.locator_output or {}
+            relevant_funcs = locator.get("relevant_functions", [])
+            if relevant_funcs:
+                from kaiwu.core.usage_finder import find_all_usages, format_usages_for_prompt
+                usages = find_all_usages(ctx.project_root, relevant_funcs)
+                usage_hint = format_usages_for_prompt(usages)
+
             prompt = (
                 f"以下代码已经通过了大部分测试（{ctx.best_tests_passed}个），但还有几个测试失败。\n"
                 f"请只修复导致失败的bug，不要改动已通过测试的代码。\n\n"
@@ -1496,14 +1657,34 @@ class GeneratorExpert:
             if fault_hint:
                 prompt += fault_hint
 
+            # 注入调用关系（rename/重构任务必须同步更新调用点）
+            if usage_hint:
+                prompt += f"{usage_hint}\n\n"
+
             prompt += f"当前文件 {fpath} 的完整内容：\n{content}\n\n"
 
             # 注入失败测试的源代码（比error output更有用）
             if test_code_snippet:
                 prompt += f"## 失败测试的源代码（展示期望行为）\n{test_code_snippet}\n\n"
 
+            # 工程约束注入：检测通用模式并提示
+            engineering_hints = self._detect_engineering_hints(failing_info)
+            if engineering_hints:
+                prompt += f"## 工程约束\n{engineering_hints}\n\n"
+
+            # 测试错误输出：优先用诊断句，fallback到原始输出
+            from kaiwu.core.test_parser import parse_test_failures, generate_diagnosis
+            structured_fails = parse_test_failures(failing_info)
+            if structured_fails:
+                diagnosis = generate_diagnosis(structured_fails)
+                if diagnosis:
+                    prompt += f"## 需要修复的问题（精确诊断）\n{diagnosis}\n\n"
+                else:
+                    prompt += f"## 测试错误输出\n{failing_info[-1500:]}\n\n"
+            else:
+                prompt += f"## 测试错误输出\n{failing_info[-1500:]}\n\n"
+
             prompt += (
-                f"## 测试错误输出\n{failing_info[-1500:]}\n\n"
                 f"输出修改后的完整文件内容。\n"
                 f"关键要求：\n"
                 f"- 重点修复上面定位到的函数中的bug\n"
@@ -1511,15 +1692,117 @@ class GeneratorExpert:
                 f"- 不要输出markdown代码块标记\n"
             )
 
+            # Docstring注入：让LLM看到函数的实现规范
+            target_funcs = [ff['function'] for ff in fault_funcs[:3]] if fault_funcs else []
+            prompt = self._inject_docstrings(prompt, content, target_funcs)
+
             if ctx.retry_hint:
                 prompt += f"\n## 重试提示\n{ctx.retry_hint}"
 
             system = self._build_system(ctx)
-            raw = self.llm.generate(prompt=prompt, system=system, max_tokens=4096, temperature=0.0)
-            self._log_llm_call(ctx, "generator_targeted_fix", prompt, system, raw)
-            code = self._clean_code_output(raw)
-            if not code or code == content:
+
+            # ═══ 异构采样+选择机制（Agentless heterogeneous prompts）═══
+            import ast as _ast
+            candidates = []
+
+            # Prompt A: 完整文件 + 测试失败（当前标准prompt）
+            prompt_a = prompt
+
+            # Prompt B: 只给故障函数 + 测试断言（聚焦prompt）
+            fault_func_code = ""
+            if fault_funcs:
+                top_func = fault_funcs[0]["function"]
+                extracted = self._extract_function(content, top_func)
+                if extracted:
+                    fault_func_code = extracted
+            prompt_b = (
+                f"修复以下函数中的bug，使测试通过。\n\n"
+                f"函数代码：\n{fault_func_code or content[:1000]}\n\n"
+            )
+            if test_code_snippet:
+                prompt_b += f"测试期望：\n{test_code_snippet}\n\n"
+            if engineering_hints:
+                prompt_b += f"工程约束：{engineering_hints}\n\n"
+            prompt_b += (
+                f"完整文件上下文：\n{content}\n\n"
+                f"输出修改后的完整文件。不要输出markdown。"
+            )
+
+            # Prompt C: 要求重写故障函数（全新实现）— 仅小文件使用
+            prompt_c = (
+                f"以下文件中的 {fault_funcs[0]['function'] if fault_funcs else '某个函数'} 有bug。\n"
+                f"请重新实现这个函数，确保它能处理所有边界情况（包括负数、空输入等）。\n\n"
+                f"当前文件：\n{content}\n\n"
+            )
+            if test_code_snippet:
+                prompt_c += f"必须通过的测试：\n{test_code_snippet}\n\n"
+            if engineering_hints:
+                prompt_c += f"工程约束：{engineering_hints}\n\n"
+            prompt_c += f"输出修改后的完整文件。不要输出markdown。"
+
+            # 根据文件大小选择prompt组合
+            if len(temperatures) == 1:
+                prompts_and_temps = [
+                    (prompt_a, temperatures[0]),
+                ]
+            elif len(temperatures) == 2:
+                prompts_and_temps = [
+                    (prompt_a, temperatures[0]),
+                    (prompt_b, temperatures[1]),
+                ]
+            else:
+                prompts_and_temps = [
+                    (prompt_a, temperatures[0]),
+                    (prompt_b, temperatures[1]),
+                    (prompt_c, temperatures[2]),
+                ]
+
+            for p, temp in prompts_and_temps:
+                raw = self.llm.generate(prompt=p, system=system, max_tokens=max_tokens, temperature=temp)
+                self._log_llm_call(ctx, "generator_targeted_fix_sample", p[:200], system, raw)
+                candidate = self._clean_code_output(raw)
+                if not candidate or candidate == content:
+                    continue
+                try:
+                    _ast.parse(candidate)
+                    candidates.append((temp, candidate))
+                except SyntaxError:
+                    continue
+
+            if not candidates:
                 continue
+
+            # 如果只有1个候选，直接用
+            if len(candidates) == 1:
+                code = candidates[0][1]
+            else:
+                # 多个候选：用测试选最佳
+                best_code = candidates[0][1]  # 默认用temp=0的
+                best_passed = -1
+
+                for temp, candidate_code in candidates:
+                    # 临时写入候选
+                    self.tools.write_file(fpath, candidate_code)
+                    # 跑测试
+                    from kaiwu.core.context import TaskContext as _TC
+                    _tmp_ctx = _TC(project_root=ctx.project_root)
+                    from kaiwu.experts.verifier import VerifierExpert as _VE
+                    _tmp_ver = _VE(self.llm, self.tools)
+                    _result = _tmp_ver.run_tests_only(_tmp_ctx)
+                    passed = _result.get("passed", 0)
+                    if passed > best_passed:
+                        best_passed = passed
+                        best_code = candidate_code
+
+                # 恢复原始文件（让verifier正式流程来写入最终版本）
+                self.tools.write_file(fpath, content)
+                code = best_code
+
+            # ═══ Execution Feedback 内循环 ═══
+            # 选出最佳候选后，立刻运行failing tests看结果
+            # 如果还有失败，把结构化诊断给LLM再生成一次（最多1轮额外尝试）
+            # 解决阻碍3（改完不知道结果）和阻碍4（每次从同一起点出发）
+            code = self._run_execution_feedback(ctx, fpath, content, code, system, max_tokens)
 
             patches.append({
                 "file": fpath,
@@ -1537,6 +1820,315 @@ class GeneratorExpert:
         }
         ctx.generator_output = result
         return result
+
+    def _run_execution_feedback(self, ctx, fpath: str, original: str, code: str,
+                                system: str, max_tokens: int) -> str:
+        """
+        Execution Feedback 内循环：选出最佳候选后立刻跑测试，
+        如果还有失败，把结构化诊断给LLM再生成一次。
+        最多1轮额外尝试，不消耗外层retry次数。
+
+        解决阻碍3（改完不知道结果）和阻碍4（每次从同一起点出发）。
+        """
+        if not self.tools:
+            return code
+
+        # 写入候选代码，跑测试
+        self.tools.write_file(fpath, code)
+        from kaiwu.core.context import TaskContext as _TC
+        from kaiwu.experts.verifier import VerifierExpert as _VE
+        _tmp_ctx = _TC(project_root=ctx.project_root)
+        _tmp_ver = _VE(self.llm, self.tools)
+        _result = _tmp_ver.run_tests_only(_tmp_ctx)
+
+        test_output = _result.get("output", "")
+        passed = _result.get("passed", 0)
+        total = _result.get("total", 0)
+
+        # 如果全部通过或没有测试输出，直接返回
+        if (passed == total and total > 0) or not test_output:
+            # 恢复原始文件（让verifier正式流程来写入最终版本）
+            self.tools.write_file(fpath, original)
+            return code
+
+        # 解析失败，生成诊断句
+        from kaiwu.core.test_parser import parse_test_failures, generate_diagnosis, extract_failing_tests
+        structured = parse_test_failures(test_output)
+        failing_tests = extract_failing_tests(test_output)
+
+        if not structured and not failing_tests:
+            # 无法解析失败信息，直接返回当前候选
+            self.tools.write_file(fpath, original)
+            return code
+
+        diagnosis = generate_diagnosis(structured) if structured else ""
+
+        # 构建反馈prompt：把真实运行结果以结构化形式给LLM
+        feedback_prompt = (
+            f"你刚才生成的代码通过了 {passed}/{total} 个测试，但还有 {total - passed} 个失败。\n"
+            f"请根据以下诊断信息修复剩余bug。\n\n"
+            f"任务：{ctx.user_input[:200]}\n\n"
+            f"当前代码（你上一轮生成的）：\n{code}\n\n"
+        )
+
+        if diagnosis:
+            feedback_prompt += f"## 还在失败的测试（精确诊断）\n{diagnosis}\n\n"
+        else:
+            feedback_prompt += f"## 测试失败输出\n{test_output[-1000:]}\n\n"
+
+        feedback_prompt += (
+            f"输出修改后的完整文件内容。\n"
+            f"只修复失败的部分，不要改动已通过测试的代码。\n"
+            f"不要输出markdown代码块标记。"
+        )
+
+        # 第二轮生成
+        import ast as _ast
+        raw = self.llm.generate(prompt=feedback_prompt, system=system,
+                                max_tokens=max_tokens, temperature=0.0)
+        self._log_llm_call(ctx, "generator_execution_feedback", feedback_prompt[:200], system, raw)
+        candidate = self._clean_code_output(raw)
+
+        if candidate and candidate != code:
+            try:
+                _ast.parse(candidate)
+                # 验证第二轮结果是否更好
+                self.tools.write_file(fpath, candidate)
+                _tmp_ctx2 = _TC(project_root=ctx.project_root)
+                _result2 = _tmp_ver.run_tests_only(_tmp_ctx2)
+                passed2 = _result2.get("passed", 0)
+
+                if passed2 >= passed:
+                    # 第二轮更好或持平，用新代码
+                    self.tools.write_file(fpath, original)
+                    return candidate
+            except SyntaxError:
+                pass
+
+        # 第二轮没有改善，恢复原始文件，返回第一轮的代码
+        self.tools.write_file(fpath, original)
+        return code
+
+    def _detect_engineering_hints(self, failing_info: str) -> str:
+        """检测测试失败中的通用工程模式，返回提示。
+        不是背题——这些是通用的工程约束（递归保护、边界检查等）。"""
+        hints = []
+        lower = failing_info.lower()
+
+        # 循环引用/无限递归检测
+        if ('recursion' in lower or 'circular' in lower) and ('ref' in lower or '$ref' in lower):
+            hints.append("处理$ref引用时必须检测循环引用（记录已访问的ref路径），避免无限递归。")
+
+        # 通用递归深度保护
+        if 'recursionerror' in lower or 'maximum recursion depth' in lower:
+            hints.append("递归函数必须有深度限制保护，超过限制时抛出清晰的错误而非让Python栈溢出。")
+
+        # 短路求值
+        if 'short' in lower and 'circuit' in lower:
+            hints.append("逻辑运算符(and/or)必须实现短路求值：左侧确定结果时不求值右侧。")
+
+        return "\n".join(hints)
+
+    def _extract_docstrings(self, file_content: str, func_names: list[str]) -> dict[str, str]:
+        """
+        用AST从文件里提取指定函数的docstring。
+        docstring是题目自带的实现规范，LLM应该读到它。
+        """
+        import ast
+        result = {}
+        try:
+            tree = ast.parse(file_content)
+            for node in ast.walk(tree):
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if func_names and node.name not in func_names:
+                    continue
+                if (node.body and
+                        isinstance(node.body[0], ast.Expr) and
+                        isinstance(node.body[0].value, ast.Constant) and
+                        isinstance(node.body[0].value.s, str)):
+                    doc = node.body[0].value.s.strip()
+                    if len(doc) > 10:  # 过滤掉太短的
+                        result[node.name] = doc
+        except Exception:
+            pass
+        return result
+
+    def _inject_docstrings(self, prompt: str, file_content: str, func_names: list[str]) -> str:
+        """把目标函数的docstring加进prompt，让LLM看到实现规范。"""
+        docs = self._extract_docstrings(file_content, func_names)
+        if not docs:
+            return prompt
+
+        prompt += "\n\n## 函数规范（来自代码注释，这是实现的标准）\n"
+        for func_name, doc in docs.items():
+            prompt += f"\n### {func_name}\n{doc[:500]}\n"
+        return prompt
+
+    def _inject_skill_context(self, ctx, prompt: str, gap_type: str) -> str:
+        """
+        从SKILL.md提取和当前任务类型相关的章节注入prompt。
+        按gap_type过滤，只注入相关内容，控制token消耗。
+        """
+        import os
+        skill_path = os.path.join(ctx.project_root, 'SKILL.md')
+        if not os.path.exists(skill_path):
+            skill_path = os.path.expanduser('~/.kwcode/SKILL.md')
+        if not os.path.exists(skill_path):
+            return prompt
+
+        try:
+            content = open(skill_path, encoding='utf-8').read()
+        except Exception:
+            return prompt
+
+        GAP_KEYWORDS = {
+            'LOGIC_ERROR': ['bug', 'fix', '修复', 'logic'],
+            'NOT_IMPLEMENTED': ['implement', 'stub', '实现', '存根'],
+            'REFACTOR': ['refactor', '重构', 'rename'],
+            'MISSING_DEP': ['import', 'module', '模块'],
+        }
+        keywords = GAP_KEYWORDS.get(gap_type, [])
+        if not keywords:
+            return prompt
+
+        relevant = []
+        current = []
+        current_match = False
+
+        for line in content.split('\n'):
+            if line.startswith('##'):
+                if current_match and current:
+                    relevant.append('\n'.join(current))
+                current = [line]
+                current_match = any(kw in line.lower() for kw in keywords)
+            else:
+                current.append(line)
+
+        if current_match and current:
+            relevant.append('\n'.join(current))
+
+        if relevant:
+            skill_text = '\n\n'.join(relevant[:2])[:800]
+            prompt += f"\n\n## 参考知识（已验证的正确模式）\n{skill_text}\n"
+
+        return prompt
+
+    def _maybe_create_missing_module(self, ctx: TaskContext, test_info: str) -> None:
+        """检测测试要求的模块是否缺失，如果缺失则用LLM生成内容。
+        确定性检测缺失模块，LLM只做内容生成。"""
+        import re as _re
+        import os
+
+        if not self.tools or not ctx.project_root:
+            return
+
+        STDLIB = {'os', 'sys', 'typing', 're', 'abc', 'json', 'datetime', 'time',
+                  'collections', 'itertools', 'functools', 'math', 'random',
+                  'pathlib', 'io', 'copy', 'hashlib', 'uuid', 'enum', 'dataclasses',
+                  'unittest', 'pytest', 'logging', 'traceback', 'inspect',
+                  'subprocess', 'shutil', 'tempfile', 'glob', 'string'}
+
+        # 从错误信息中提取缺失的模块名
+        # ModuleNotFoundError: No module named 'xxx'
+        # ImportError: cannot import name 'Foo' from 'bar'
+        patterns = [
+            r"No module named '(\w+)'",
+            r"cannot import name '(\w+)' from '(\w+)'",
+        ]
+
+        modules_to_create = {}  # mod_name -> list of imported names
+        for pattern in patterns:
+            for m in _re.finditer(pattern, test_info):
+                if 'module named' in pattern:
+                    mod_name = m.group(1)
+                    if mod_name not in STDLIB:
+                        modules_to_create.setdefault(mod_name, [])
+                else:
+                    imported_name = m.group(1)
+                    mod_name = m.group(2)
+                    if mod_name not in STDLIB:
+                        modules_to_create.setdefault(mod_name, []).append(imported_name)
+
+        # 也检测测试文件中的 from xxx import 语句
+        if not modules_to_create:
+            matches = _re.findall(r'from (\w+) import (.+)', test_info)
+            for mod, names_str in matches:
+                if mod in STDLIB:
+                    continue
+                mod_file = os.path.join(ctx.project_root, f"{mod}.py")
+                if not os.path.exists(mod_file):
+                    names = [n.strip() for n in names_str.split(',')]
+                    modules_to_create.setdefault(mod, []).extend(names)
+
+        # 创建缺失的模块文件（用LLM生成内容）
+        for mod, names in modules_to_create.items():
+            mod_file = os.path.join(ctx.project_root, f"{mod}.py")
+            if os.path.exists(mod_file):
+                continue
+
+            # 用LLM生成模块内容
+            names_list = list(set(names)) if names else []
+            code = self._generate_missing_module_content(ctx, mod, names_list)
+
+            if code:
+                self.tools.write_file(f"{mod}.py", code)
+            else:
+                # fallback: 创建带注释的空文件
+                header = f'"""\n{mod} module — auto-created because tests import it.\nImplement the required classes/functions to make tests pass.\n"""\n'
+                self.tools.write_file(f"{mod}.py", header)
+
+            logger.info("[create_file] Created missing module: %s.py", mod)
+
+            # 把新文件加入locator_output让后续流程处理
+            if ctx.locator_output:
+                existing_files = ctx.locator_output.get("relevant_files", [])
+                if f"{mod}.py" not in existing_files:
+                    existing_files.append(f"{mod}.py")
+                    ctx.locator_output["relevant_files"] = existing_files
+
+    def _generate_missing_module_content(self, ctx: TaskContext, module_name: str,
+                                          names: list[str]) -> str:
+        """用LLM生成缺失模块的内容。确定性检测+LLM生成。"""
+        # 收集上下文：测试文件中对该模块的使用方式
+        test_usage = ""
+        if self.tools and ctx.project_root:
+            dir_contents = self.tools.list_dir(ctx.project_root)
+            test_files = [f for f in dir_contents if 'test' in f.lower() and f.endswith('.py')]
+            for tf in test_files[:1]:
+                content = self.tools.read_file(tf)
+                if content and not content.startswith("[ERROR]"):
+                    # 提取与该模块相关的行
+                    relevant_lines = [
+                        line for line in content.split('\n')
+                        if module_name in line or any(n in line for n in names)
+                    ]
+                    test_usage = '\n'.join(relevant_lines[:30])
+
+        prompt = f"创建Python模块 {module_name}.py\n\n"
+        if names:
+            prompt += f"该模块需要包含以下类/函数（从import语句推断）：\n"
+            prompt += '\n'.join(f"- {name}" for name in names) + '\n\n'
+        if test_usage:
+            prompt += f"测试文件中的使用方式：\n{test_usage}\n\n"
+
+        initial_failure = getattr(ctx, 'initial_test_failure', '') or ''
+        if initial_failure:
+            prompt += f"当前测试失败信息（参考）：\n{initial_failure[-800:]}\n\n"
+
+        prompt += (
+            f"根据测试的使用方式实现这些类/函数。\n"
+            f"只输出Python代码，不要任何解释或markdown标记。"
+        )
+
+        system = "You are a code generator. Output ONLY Python code. No explanations, no markdown."
+        raw = self.llm.generate(prompt=prompt, system=system, max_tokens=2048, temperature=0.0)
+        self._log_llm_call(ctx, "generator_create_module", prompt[:200], system, raw)
+        code = self._clean_code_output(raw)
+
+        if code and self._is_valid_syntax(code):
+            return code
+        return ""
 
     def _extract_failing_test_code(self, ctx: TaskContext, source_fpath: str) -> str:
         """从测试文件中提取失败测试的源代码，让LLM看到expected值。"""
@@ -1611,7 +2203,172 @@ class GeneratorExpert:
 
         return "\n\n".join(snippets[:3])  # 最多3个测试函数
 
-    def _run_stub_decomposed(self, ctx: TaskContext, files: list[str], funcs: list[str]) -> Optional[dict]:
+    def _count_distinct_bugs(self, test_output: str) -> int:
+        """从测试输出中计算不同类别的bug数量（用于决定是否逐bug拆解）。"""
+        import re as _re
+        # 统计不同的FAILED测试类别（按TestClass分组）
+        failed_tests = _re.findall(r'FAILED\s+\S+::(Test\w+)::', test_output)
+        if not failed_tests:
+            # fallback: 直接数FAILED行
+            return test_output.count('FAILED')
+        return len(set(failed_tests))
+
+    def _run_bug_decomposed(self, ctx: TaskContext, files: list[str]) -> Optional[dict]:
+        """多bug任务逐bug拆解：每次只修一类bug，验证后再修下一类。
+        比whole_file一次修所有bug更可靠——LLM一次只需关注一个问题。
+
+        策略：
+        1. 从测试失败中提取不同的bug类别
+        2. 按优先级排序（简单的先修）
+        3. 每类bug独立LLM调用，修完验证
+        4. 累积修复，不退步
+        """
+        import ast as _ast
+        import re as _re
+
+        initial_failure = getattr(ctx, 'initial_test_failure', '') or ''
+
+        # 找到源文件
+        source_file = None
+        content = None
+        for fpath in files[:3]:
+            if "test" in fpath.lower():
+                continue
+            if self.tools:
+                c = self.tools.read_file(fpath)
+                if c and not c.startswith("[ERROR]"):
+                    source_file = fpath
+                    content = c
+                    break
+
+        if not source_file or not content:
+            return None
+
+        # 从FAILED行提取bug类别（按TestClass分组）
+        failed_lines = _re.findall(r'FAILED\s+\S+::(Test\w+)::(\w+)', initial_failure)
+        if not failed_lines:
+            return None
+
+        # 按TestClass分组
+        bug_groups = {}
+        for test_class, test_method in failed_lines:
+            bug_groups.setdefault(test_class, []).append(test_method)
+
+        # 按组大小排序（小组先修，容易成功建立信心）
+        sorted_groups = sorted(bug_groups.items(), key=lambda x: len(x[1]))
+
+        # 逐组修复
+        current_content = content
+        total_fixed = 0
+        max_groups = 3  # 最多修3组（时间预算）
+
+        for group_name, test_methods in sorted_groups[:max_groups]:
+            # 构建针对这一组bug的prompt
+            test_snippet = self._extract_specific_tests(ctx, test_methods)
+
+            # 从initial_failure中提取这组的错误信息
+            group_errors = []
+            for method in test_methods:
+                # 找到这个测试的错误块
+                pattern = f'.*{method}.*'
+                matches = _re.findall(pattern, initial_failure)
+                group_errors.extend(matches[:2])
+
+            prompt = (
+                f"修复以下代码中导致 {group_name} 测试失败的bug。\n"
+                f"只修这一类bug，不要改动其他代码。\n\n"
+                f"当前文件 {source_file}：\n{current_content}\n\n"
+            )
+            if test_snippet:
+                prompt += f"## 失败的测试\n{test_snippet}\n\n"
+            if group_errors:
+                prompt += f"## 错误信息\n" + "\n".join(group_errors[:5]) + "\n\n"
+            prompt += "输出修改后的完整文件。不要输出markdown。"
+
+            system = self._build_system(ctx)
+            raw = self.llm.generate(prompt=prompt, system=system, max_tokens=4096, temperature=0.0)
+            self._log_llm_call(ctx, "generator_bug_decomposed", prompt[:200], system, raw)
+
+            candidate = self._clean_code_output(raw)
+            if not candidate or candidate == current_content:
+                continue
+            try:
+                _ast.parse(candidate)
+            except SyntaxError:
+                continue
+
+            # 验证：写入候选，跑测试，确认不退步
+            self.tools.write_file(source_file, candidate)
+            from kaiwu.core.context import TaskContext as _TC
+            _tmp_ctx = _TC(project_root=ctx.project_root)
+            from kaiwu.experts.verifier import VerifierExpert as _VE
+            _tmp_ver = _VE(self.llm, self.tools)
+            _result = _tmp_ver.run_tests_only(_tmp_ctx)
+            new_passed = _result.get("passed", 0)
+
+            if new_passed > total_fixed:
+                # 进步了，保留
+                current_content = candidate
+                total_fixed = new_passed
+                logger.info("[bug_decomposed] %s: %d tests passed (+%d)",
+                           group_name, new_passed, new_passed - total_fixed)
+            else:
+                # 退步或无进步，回滚
+                self.tools.write_file(source_file, current_content)
+
+        # 恢复原始文件（让verifier正式流程来写入）
+        self.tools.write_file(source_file, content)
+
+        if current_content == content:
+            return None
+
+        result = {
+            "patches": [{
+                "file": source_file,
+                "content": current_content,
+                "write_mode": "whole_file",
+            }],
+            "explanation": f"Modified: {source_file}:bug_decomposed({total_fixed} tests passed)",
+        }
+        ctx.generator_output = result
+        return result
+
+    def _extract_specific_tests(self, ctx: TaskContext, test_methods: list) -> str:
+        """提取指定测试方法的源代码。"""
+        if not self.tools or not ctx.project_root:
+            return ""
+
+        # 找测试文件
+        dir_contents = self.tools.list_dir(ctx.project_root)
+        test_files = [f for f in dir_contents if 'test' in f.lower() and f.endswith('.py')]
+        if not test_files:
+            return ""
+
+        test_content = self.tools.read_file(test_files[0])
+        if not test_content or test_content.startswith("[ERROR]"):
+            return ""
+
+        snippets = []
+        lines = test_content.split("\n")
+        for method in test_methods[:3]:
+            pattern = f"def {method}"
+            for i, line in enumerate(lines):
+                if pattern in line:
+                    # 提取函数体
+                    end = i + 1
+                    indent = len(line) - len(line.lstrip())
+                    while end < len(lines):
+                        l = lines[end]
+                        if l.strip() and not l.startswith(" " * (indent + 1)) and not l.strip().startswith("#"):
+                            if l.strip().startswith(("def ", "class ")):
+                                break
+                        end += 1
+                        if end - i > 15:
+                            break
+                    snippets.append("\n".join(lines[i:end]))
+                    break
+
+        return "\n\n".join(snippets)
         """
         Sub-task decomposition for stub tasks.
         Instead of asking LLM to implement all pass functions at once,

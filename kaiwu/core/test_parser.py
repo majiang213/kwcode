@@ -5,7 +5,7 @@
 
 import re
 
-__all__ = ["extract_failing_tests", "extract_passing_tests", "parse_test_failures"]
+__all__ = ["extract_failing_tests", "extract_passing_tests", "parse_test_failures", "generate_diagnosis"]
 
 
 def extract_failing_tests(output: str) -> list[str]:
@@ -323,3 +323,79 @@ def attribute_failures_to_files(test_output: str, source_files: list[str]) -> di
 
     # 清理空列表
     return {k: v for k, v in result.items() if v}
+
+
+def generate_diagnosis(structured_failures: list[dict]) -> str:
+    """
+    把结构化失败信息转成LLM最容易理解的诊断句。
+    工程做，不走LLM，确定性。
+
+    输入: parse_test_failures() 的返回值
+    输出: 多行诊断文本，每行一个失败，格式清晰直接
+
+    设计原则：
+    - 32B模型看原始pytest输出效果差，但看"函数X应该返回Y，实际返回Z"能直接修
+    - 按错误类型分类，给出不同格式的诊断
+    - 如果能从stack trace提取故障函数，直接指出
+    """
+    if not structured_failures:
+        return ""
+
+    lines = []
+    for f in structured_failures[:5]:
+        name = f.get('test_name', '')
+        expected = f.get('expected', '')
+        actual = f.get('actual', '')
+        error_type = f.get('error_type', '')
+        snippet = f.get('snippet', '')
+        file = f.get('file', '')
+        line_no = f.get('line', 0)
+
+        # 定位信息前缀
+        loc = f" ({file}:{line_no})" if file and line_no else ""
+
+        if error_type == 'AssertionError' and expected and actual:
+            # 最精确的情况：知道期望和实际
+            lines.append(
+                f"- {name}{loc}: 应该返回 {expected}，实际返回 {actual}"
+            )
+        elif error_type == 'AttributeError':
+            lines.append(
+                f"- {name}{loc}: {snippet[:120]}（对象缺少该属性或方法）"
+            )
+        elif error_type == 'TypeError':
+            lines.append(
+                f"- {name}{loc}: {snippet[:120]}（类型不匹配）"
+            )
+        elif error_type == 'KeyError':
+            lines.append(
+                f"- {name}{loc}: {snippet[:120]}（字典缺少该key）"
+            )
+        elif error_type == 'ValueError':
+            lines.append(
+                f"- {name}{loc}: {snippet[:120]}（值不合法）"
+            )
+        elif error_type == 'NotImplementedError':
+            lines.append(
+                f"- {name}{loc}: 函数未实现（需要补充实现）"
+            )
+        elif error_type == 'IndexError':
+            lines.append(
+                f"- {name}{loc}: {snippet[:120]}（索引越界）"
+            )
+        elif error_type == 'ZeroDivisionError':
+            lines.append(
+                f"- {name}{loc}: 除零错误（需要处理除数为0的情况）"
+            )
+        elif expected and actual:
+            # 有期望/实际但没有明确错误类型
+            lines.append(
+                f"- {name}{loc}: 期望 {expected}，实际 {actual}"
+            )
+        elif snippet:
+            # 只有snippet，直接展示
+            lines.append(f"- {name}{loc}: {snippet[:120]}")
+        else:
+            lines.append(f"- {name}: 测试失败（无详细信息）")
+
+    return "\n".join(lines)

@@ -484,10 +484,30 @@ class PipelineOrchestrator:
             if current_error_type == "import":
                 fixed = self._try_import_fix(ctx, on_status)
                 if not fixed:
-                    missing = ctx.verifier_output.get("error_message", "") if ctx.verifier_output else ""
-                    self._emit(on_status, "circuit_break", f"缺少依赖：{missing}，请先安装")
-                    self.bus.emit("circuit_break", {"msg": f"import: {missing}"})
-                    break
+                    # 尝试创建缺失的本地模块（用LLM生成内容）
+                    error_msg = ctx.verifier_output.get("error_message", "") if ctx.verifier_output else ""
+                    error_detail = ctx.verifier_output.get("error_detail", "") if ctx.verifier_output else ""
+                    self.generator._maybe_create_missing_module(ctx, error_detail or error_msg)
+                    # 检查是否创建成功（文件是否存在了）
+                    import re as _re
+                    mod_match = _re.search(r"No module named '(\w+)'", error_msg)
+                    if mod_match:
+                        import os
+                        mod_file = os.path.join(ctx.project_root, f"{mod_match.group(1)}.py")
+                        if os.path.exists(mod_file):
+                            # 模块已创建，继续重试
+                            self._emit(on_status, "create_module",
+                                       f"已创建缺失模块: {mod_match.group(1)}.py")
+                        else:
+                            missing = error_msg
+                            self._emit(on_status, "circuit_break", f"缺少依赖：{missing}，请先安装")
+                            self.bus.emit("circuit_break", {"msg": f"import: {missing}"})
+                            break
+                    else:
+                        missing = error_msg
+                        self._emit(on_status, "circuit_break", f"缺少依赖：{missing}，请先安装")
+                        self.bus.emit("circuit_break", {"msg": f"import: {missing}"})
+                        break
                 # import修复成功，继续重试
             # 硬熔断：同类错误连续3次
             if ctx._error_type_streak["count"] >= 3:
@@ -517,42 +537,8 @@ class PipelineOrchestrator:
                 reason=f"error_type={current_error_type}, detail={error_detail[:200]}",
                 context={"error_type_streak": ctx._error_type_streak, "attempt_record": attempt_record})
 
-            # 第2次重试前反思：让LLM分析失败原因
-            if ctx.retry_count == 1 and ctx.verifier_output and ctx.generator_output:
-                self._do_reflection(ctx, on_status)
-
-            # Debug子代理：捕获运行时信息（仅测试失败时）
-            if ctx.retry_count >= 1 and ctx.verifier_output:
-                self._do_debug(ctx, on_status)
-
             # 设置重试策略：每次重试用不同方法
             ctx.retry_strategy = ctx.retry_count  # 0→1→2
-
-            # Think escalation：只在assertion错误时升级（逻辑错误需要深度推理，其他错误想更久没用）
-            if current_error_type == "assertion":
-                if ctx.retry_count == 1 and not ctx.think_config.get("think"):
-                    ctx.think_config = {"think": True, "budget": 2048}
-                    self._emit(on_status, "think_escalate", "逻辑错误，升级到深度推理")
-                elif ctx.retry_count >= 2 and ctx.think_config.get("budget", 0) < 4096:
-                    ctx.think_config = {"think": True, "budget": 4096}
-                    self._emit(on_status, "think_escalate", "最大推理预算")
-
-            # 错误驱动搜索：按失败类型决定是否搜索（网络保护：异常不阻塞）
-            if self._should_search(current_error_type, ctx.retry_count) and not ctx.search_triggered and not no_search:
-                try:
-                    self._emit(on_status, "search", f"搜索 {current_error_type} 解法...")
-                    self.bus.emit("search_start", {"msg": f"搜索 {current_error_type} 解法"})
-                    results = self.search_augmentor.search(ctx)
-                    if results:  # 搜到才用，搜不到继续原流程
-                        ctx.search_results = results
-                        ctx.search_triggered = True
-                        self._emit(on_status, "search_done", f"搜索完成，注入{len(results)}字参考信息")
-                        self.bus.emit("search_solution", {"msg": "找到参考方案"})
-                    else:
-                        ctx.search_triggered = True  # 标记已尝试，不重复触发
-                except Exception as e:
-                    logger.debug("Search failed (网络保护，不阻塞): %s", e)
-                    ctx.search_triggered = True  # 失败也标记，避免循环重试搜索
 
             # ── ExecutionStateTracker：记录测试状态变化 ──
             if ctx.verifier_output:
@@ -1238,20 +1224,24 @@ class PipelineOrchestrator:
         if failed_tests:
             hint += "\n\n仍然失败的测试：\n" + "\n".join(f"  - {t}" for t in failed_tests[:5])
 
-        # structured_failures精确传递：具体哪个测试失败、期望什么、实际什么
+        # structured_failures精确传递：用诊断句替代简单的期望/实际拼接
         try:
-            from kaiwu.core.test_parser import parse_test_failures
+            from kaiwu.core.test_parser import parse_test_failures, generate_diagnosis
             error_detail = (ctx.verifier_output or {}).get("error_detail", "")
             if error_detail:
                 failures = parse_test_failures(error_detail)
                 if failures:
-                    hint += "\n\n还在失败的具体测试：\n"
-                    for f in failures[:4]:
-                        hint += (
-                            f"- {f['test_name']}: "
-                            f"期望{f.get('expected', '?')}，"
-                            f"实际{f.get('actual', '?')}\n"
-                        )
+                    diagnosis = generate_diagnosis(failures)
+                    if diagnosis:
+                        hint += f"\n\n## 还在失败的具体测试（精确诊断）\n{diagnosis}\n"
+                    else:
+                        hint += "\n\n还在失败的具体测试：\n"
+                        for f in failures[:4]:
+                            hint += (
+                                f"- {f['test_name']}: "
+                                f"期望{f.get('expected', '?')}，"
+                                f"实际{f.get('actual', '?')}\n"
+                            )
         except Exception:
             pass  # 非阻塞
 
@@ -1269,6 +1259,25 @@ class PipelineOrchestrator:
                     )
             if lessons:
                 hint += "\n\n## 历史尝试记录（避免重复错误）\n" + "\n".join(lessons)
+
+        # Delta反馈：告诉LLM相比上一次的进退情况
+        current_passed = (ctx.verifier_output or {}).get("tests_passed", 0)
+        if current_passed > 0:
+            last_passed = getattr(ctx, '_last_ver_passed', 0)
+            pre_passed = getattr(ctx, '_pre_test_passed', 0)
+
+            if last_passed > 0:
+                delta = current_passed - last_passed
+                if delta > 0:
+                    hint += f"\n\n相比上一次尝试，新增通过了{delta}个测试，保持这个方向继续修复。"
+                elif delta < 0:
+                    hint += f"\n\n注意：相比上一次退步了{-delta}个测试，请更保守地修改，不要破坏已通过的测试。"
+                elif delta == 0 and last_passed > pre_passed:
+                    hint += f"\n\n上次修改有效（比初始多通过{last_passed - pre_passed}个），但还有测试失败，继续修复剩余问题。"
+            elif current_passed > pre_passed:
+                hint += f"\n\n已经比初始状态多通过了{current_passed - pre_passed}个测试，保持进展继续修复。"
+
+            ctx._last_ver_passed = current_passed
 
         return hint
 

@@ -4,6 +4,32 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [1.9.0] - 2026-05-09
+
+### 9项架构优化：从"LLM看不懂反馈"到"工程替LLM消化反馈"
+
+**核心理念**：32B模型无法有效整合raw测试输出（业界论文已证实），kwcode的差异化是工程把反馈解析成LLM最容易理解的形式。
+
+### Added
+
+- **结构化诊断句**（`generate_diagnosis()`）：把pytest raw输出转成"函数X应该返回Y，实际返回Z"的精确诊断，替代原始2000字输出注入。按错误类型分类（AssertionError/AttributeError/TypeError/KeyError等），每种给出最直接的描述
+- **Execution Feedback内循环**（`_run_execution_feedback()`）：Generator选出最佳候选后立刻跑测试，如果还有失败则把结构化诊断给LLM再生成一次。最多1轮额外尝试，不消耗外层retry次数
+- **Docstring注入**（`_extract_docstrings()` + `_inject_docstrings()`）：用AST提取目标函数的docstring（实现规范），注入prompt。LLM读到docstring里的示例和约束后能直接推理出正确实现
+- **SKILL.md稳定注入**（`_inject_skill_context()`）：按gap_type过滤SKILL.md中相关章节，只注入与当前任务类型匹配的已验证模式
+- **LLM生成缺失模块**（`_generate_missing_module_content()`）：ImportError时不再只创建空文件，而是用LLM根据测试使用方式生成模块内容
+- **批次拆解循环**：`_run_whole_file_refactor`中，当失败测试>3个时分批处理，每批生成后立刻验证，通过则保留继续下一批，退步则回滚
+- **Delta反馈**：`_build_retry_hint()`中加入"相比上一次新增通过N个测试"或"退步了N个测试"的明确delta信息
+
+### Changed
+
+- **诊断句替代raw输出**：generator.py中3个注入点（targeted fix、whole file refactor、_generate_modified）统一优先用诊断句，fallback到raw输出
+- **orchestrator import熔断增强**：import_fixer失败后不再直接熔断，先尝试用LLM创建缺失的本地模块
+- **retry_hint诊断句**：orchestrator的structured_failures传递改用generate_diagnosis()格式化
+
+### Fixed
+
+- **`_detect_engineering_hints`方法签名丢失**：编辑过程中方法def行被意外删除，已恢复
+
 ## [1.7.0] - 2026-05-07
 
 ### KAIJU架构借鉴 + DetailedLogger + Bounded Context

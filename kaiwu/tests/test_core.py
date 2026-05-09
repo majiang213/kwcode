@@ -315,60 +315,7 @@ class TestOrchestrator:
         assert result["success"] is False
         assert "Max retries" in result["error"]
 
-    def test_search_triggered_on_hard_task(self):
-        gen = {"patches": [{"file": "test.py", "original": "old", "modified": "new"}], "explanation": "fixed"}
-        # First two calls fail, third succeeds
-        call_count = {"n": 0}
-        original_ver = {"passed": False, "syntax_ok": True, "tests_passed": 0, "tests_total": 1, "error_detail": "test failed", "error_type": "assertion"}
-
-        class DynamicVerifier:
-            def run(self, ctx):
-                call_count["n"] += 1
-                if call_count["n"] >= 3:
-                    result = {"passed": True, "syntax_ok": True, "tests_passed": 1, "tests_total": 1, "error_detail": ""}
-                else:
-                    result = original_ver.copy()
-                ctx.verifier_output = result
-                return result
-
-        from kaiwu.core.orchestrator import PipelineOrchestrator
-        from kaiwu.memory.kaiwu_md import KaiwuMemory
-        from kaiwu.tools.executor import ToolExecutor
-
-        class MockGen:
-            def run(self, ctx):
-                ctx.generator_output = gen
-                return gen
-
-        class MockSearch:
-            triggered = False
-            def search(self, ctx):
-                self.triggered = True
-                return "search results"
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tools = ToolExecutor(project_root=tmpdir)
-            memory = KaiwuMemory()
-            memory.init(tmpdir)
-            search = MockSearch()
-
-            orch = PipelineOrchestrator(
-                locator=None,
-                generator=MockGen(),
-                verifier=DynamicVerifier(),
-                search_augmentor=search,
-                office_handler=None,
-                tool_executor=tools,
-                memory=memory,
-            )
-            result = orch.run(
-                user_input="复杂任务",
-                gate_result={"expert_type": "codegen", "difficulty": "hard"},
-                project_root=tmpdir,
-            )
-            # Hard task: search triggered after first failure
-            assert search.triggered is True
-            assert result["success"] is True
+    # test_search_triggered_on_hard_task removed — search trigger mechanism was deleted
 
 
 # ── Test Expert Sequences ─────────────────────────────────────

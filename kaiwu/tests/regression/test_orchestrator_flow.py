@@ -99,37 +99,7 @@ def test_context_reset_between_retries():
     assert ctx.relevant_code_snippets == {}
 
 
-# ── Test 4: Search triggers after 2 failures ──────────────────────────
-
-
-def test_search_triggers_after_2_failures(tmp_path):
-    locator = MagicMock()
-    locator.run.return_value = None
-    del locator.notify_task_result
-
-    generator = MagicMock()
-    generator.run.return_value = None
-
-    search = MagicMock()
-    search.search.return_value = "some search results"
-
-    orch = make_orchestrator(
-        tmp_path,
-        mock_locator=locator,
-        mock_generator=generator,
-        mock_search=search,
-    )
-
-    result = orch.run(
-        user_input="fix bug",
-        gate_result={"expert_type": "locator_repair", "difficulty": "hard"},
-        project_root=str(tmp_path),
-        no_search=False,
-    )
-
-    assert result["success"] is False
-    # Search should have been called after failures (hard task triggers earlier)
-    assert search.search.called
+# ── Test 4: (removed — search trigger mechanism was deleted) ──────────
 
 
 # ── Test 5: Chat type bypasses pipeline ────────────────────────────────
@@ -157,39 +127,4 @@ def test_chat_type_bypasses_pipeline(tmp_path):
     locator.run.assert_not_called()
 
 
-# ── Test 6: Hard task triggers search after 1 failure ──────────────────
-
-
-def test_hard_task_search_after_1_failure(tmp_path):
-    locator = MagicMock()
-    locator.run.return_value = {"relevant_files": ["a.py"], "relevant_functions": ["f"]}
-    del locator.notify_task_result
-
-    generator = MagicMock()
-    generator.run.return_value = {"patches": [{"file": "a.py", "original": "", "modified": "x"}], "explanation": "fix"}
-
-    verifier = MagicMock()
-    verifier.run.return_value = {"passed": False, "error_detail": "test failed"}
-
-    search = MagicMock()
-    search.search.return_value = "search context"
-
-    orch = make_orchestrator(
-        tmp_path,
-        mock_locator=locator,
-        mock_generator=generator,
-        mock_verifier=verifier,
-        mock_search=search,
-    )
-
-    result = orch.run(
-        user_input="refactor module",
-        gate_result={"expert_type": "locator_repair", "difficulty": "hard"},
-        project_root=str(tmp_path),
-        no_search=False,
-    )
-
-    # Pipeline exhausts retries since verifier always fails
-    assert result["success"] is False
-    # Search should trigger after first failure for hard tasks
-    assert search.search.called
+# ── Test 6: (removed — search trigger mechanism was deleted) ──────────
