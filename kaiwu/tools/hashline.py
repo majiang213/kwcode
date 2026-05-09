@@ -136,7 +136,19 @@ def apply_anchor_edits(content: str, edits: list[dict]) -> tuple[str, list[str]]
         return content, errors  # No changes applied
 
     # Apply edits in reverse order (so line numbers stay valid)
-    sorted_edits = sorted(edits, key=lambda e: e["line"], reverse=True)
+    # Group INSERT_AFTER edits at same line to preserve order
+    sorted_edits = sorted(edits, key=lambda e: (e["line"], 0 if e["action"] != "insert_after" else 1), reverse=True)
+    # For multiple INSERT_AFTER at same line, reverse again to maintain original order
+    i = 0
+    while i < len(sorted_edits):
+        j = i
+        while j < len(sorted_edits) and sorted_edits[j]["line"] == sorted_edits[i]["line"] and sorted_edits[j]["action"] == "insert_after":
+            j += 1
+        if j - i > 1:
+            # Reverse the group so they insert in correct order (since we process in reverse)
+            sorted_edits[i:j] = sorted_edits[i:j][::-1]
+        i = j if j > i else i + 1
+
     for edit in sorted_edits:
         idx = edit["line"] - 1
         if edit["action"] == "edit":
@@ -151,8 +163,21 @@ def apply_anchor_edits(content: str, edits: list[dict]) -> tuple[str, list[str]]
         elif edit["action"] == "insert_after":
             original_indent = _get_indent(lines[idx])
             new_content = edit["content"]
+            anchor_stripped = lines[idx].rstrip()
+            anchor_ends_colon = anchor_stripped.endswith(":")
+
             if not new_content.startswith((" ", "\t")):
-                new_content = original_indent + new_content
+                # 内容无缩进：根据anchor行上下文决定缩进
+                if anchor_ends_colon:
+                    new_content = original_indent + "    " + new_content
+                else:
+                    new_content = original_indent + new_content
+            else:
+                # 内容已有缩进：检查是否缩进不足（LLM常见错误）
+                content_indent = _get_indent(new_content)
+                if anchor_ends_colon and len(content_indent) <= len(original_indent):
+                    # anchor以:结尾但新行缩进不够，强制加一级
+                    new_content = original_indent + "    " + new_content.lstrip()
             lines.insert(idx + 1, new_content)
 
     return "\n".join(lines), []

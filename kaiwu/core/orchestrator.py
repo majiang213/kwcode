@@ -102,7 +102,7 @@ class PipelineOrchestrator:
     """Deterministic expert pipeline orchestrator."""
 
     MAX_RETRIES = 3  # 默认值，被 _get_max_retries() 覆盖
-    _RETRY_BY_DIFFICULTY = {"easy": 2, "hard": 4}  # 动态重试预算
+    _RETRY_BY_DIFFICULTY = {"easy": 3, "hard": 4}  # 动态重试预算
 
     def __init__(
         self,
@@ -308,6 +308,9 @@ class PipelineOrchestrator:
                 if pre_output:
                     ctx.initial_test_failure = pre_output
 
+                # 记录初始通过数，供verifier判断是否退步
+                ctx._pre_test_passed = pre_result.get("passed", 0)
+
                 # GapDetector计算初始Gap（驱动后续所有决策）
                 ctx.gap = self._gap_detector.compute(pre_output, project_root)
 
@@ -381,13 +384,6 @@ class PipelineOrchestrator:
         # 按任务难度动态调整重试预算
         max_retries = self._get_max_retries(gate_result)
 
-        # 低置信度：减少重试预算（不值得多次尝试）
-        confidence = gate_result.get("confidence", 1.0)
-        if confidence < 0.6 and expert_type not in ("chat", "office", "vision"):
-            max_retries = min(max_retries, 2)
-            self._emit(on_status, "low_confidence",
-                       f"任务分类置信度较低({confidence:.0%})，减少重试次数")
-
         # CognitiveGate 重置
         self._cognitive_gate.reset()
 
@@ -420,6 +416,15 @@ class PipelineOrchestrator:
             error_detail = ""
             if ctx.verifier_output:
                 error_detail = ctx.verifier_output.get("error_detail", "")
+
+            # syntax error不消耗retry次数（LLM输出格式问题，不是逻辑问题）
+            # 但限制最多2次syntax免费重试，防止无限循环
+            if ctx.verifier_output and ctx.verifier_output.get("error_type") == "syntax":
+                if not hasattr(ctx, '_syntax_free_retries'):
+                    ctx._syntax_free_retries = 0
+                ctx._syntax_free_retries += 1
+                if ctx._syntax_free_retries <= 2:
+                    ctx.retry_count -= 1  # 退回，不算这次
 
             # 保存失败信息用于重试策略
             ctx.previous_failure = error_detail
@@ -566,7 +571,17 @@ class PipelineOrchestrator:
                 if self._state_tracker.has_regression():
                     self._emit(on_status, "regression_detected",
                                f"第{ctx.retry_count}次修改引入了回归，回滚...")
-                    if checkpoint_saved:
+                    # 优先用regression_guard的best_code_snapshot回滚（保留部分进展）
+                    # 只有在没有best_code_snapshot时才用checkpoint（完全回滚到原始状态）
+                    if ctx.best_code_snapshot:
+                        for fname, content in ctx.best_code_snapshot.items():
+                            try:
+                                self.tools.write_file(fname, content)
+                            except Exception:
+                                pass
+                        self._emit(on_status, "regression_rollback",
+                                   f"已回滚到最优状态（{ctx.best_tests_passed}个测试通过）")
+                    elif checkpoint_saved:
                         checkpoint.restore()
                     # TraceCoder: 回归时携带具体信息，不是空白重试
                     regressed_tests = self._state_tracker.get_new_failures() if hasattr(self._state_tracker, 'get_new_failures') else []
@@ -584,10 +599,13 @@ class PipelineOrchestrator:
                 self._emit(on_status, "env_changed", "环境已变化，重新分析...")
 
             # Reset expert outputs for retry (RED-3: fresh context each attempt)
-            ctx.locator_output = None
+            # 保留locator_output：如果下一轮sequence不含locator，generator需要它
+            # 只有sequence包含locator时才清空（locator会重新填充）
+            if "locator" in sequence:
+                ctx.locator_output = None
+                ctx.relevant_code_snippets = {}
             ctx.generator_output = None
             ctx.verifier_output = None
-            ctx.relevant_code_snippets = {}
             # 清除临时调试信息，防止context污染
             ctx.debug_info = ""
 
@@ -793,13 +811,22 @@ class PipelineOrchestrator:
                                elapsed: float, checkpoint, checkpoint_saved: bool,
                                on_status) -> dict:
         """Record failure: checkpoint restore, memory, registry, trajectory, AB, value, reflection."""
-        # Checkpoint: restore on failure
-        if checkpoint_saved:
+        # Checkpoint: restore on failure — 但如果有best_code_snapshot（部分进展），保留进展不恢复
+        if checkpoint_saved and not ctx.best_code_snapshot:
             restored = checkpoint.restore()
             if restored:
                 self._emit(on_status, "checkpoint", "已还原到任务执行前的状态")
             else:
                 self._emit(on_status, "warning", "还原失败，请手动检查文件")
+        elif ctx.best_code_snapshot:
+            # 有部分进展，重新写回best_state（确保不被其他逻辑覆盖）
+            for fname, content in ctx.best_code_snapshot.items():
+                try:
+                    self.tools.write_file(fname, content)
+                except Exception:
+                    pass
+            self._emit(on_status, "best_state_kept",
+                       f"保留最优中间状态（{ctx.best_tests_passed}个测试通过）")
         # 降级建议
         self._suggest_downgrade(ctx, on_status)
 
@@ -907,6 +934,33 @@ class PipelineOrchestrator:
                         {"passed": False, "error_type": result.get("error_type", "") if result else "", "error_detail": detail[:1000], "tests_passed": result.get("tests_passed", 0) if result else 0, "tests_total": result.get("tests_total", 0) if result else 0})
                     # ── 不退步保护：verifier失败时检查是否退步 ──
                     self._regression_guard(ctx, result, on_status)
+                    # 额外保障：从patch内容直接保存最优状态（verifier已rollback磁盘文件）
+                    tp_fail = result.get("tests_passed", 0) if result else 0
+                    if tp_fail > ctx.best_tests_passed and ctx.generator_output:
+                        ctx.best_tests_passed = tp_fail
+                        snapshot = {}
+                        for p in ctx.generator_output.get("patches", []):
+                            f = p.get("file", "")
+                            if not f:
+                                continue
+                            # 从patch内容获取（verifier已rollback磁盘，不能从磁盘读）
+                            if p.get("write_mode") == "whole_file":
+                                content = p.get("content", "") or p.get("modified", "")
+                            elif p.get("modified"):
+                                # apply_patch模式：需要从original+modified重建
+                                orig = p.get("original", "")
+                                mod = p.get("modified", "")
+                                full = self.tools.read_file(f)  # 已rollback的原始文件
+                                if full and not full.startswith("[ERROR]") and orig:
+                                    content = full.replace(orig, mod, 1)
+                                else:
+                                    content = ""
+                            else:
+                                content = ""
+                            if content:
+                                snapshot[f] = content
+                        if snapshot:
+                            ctx.best_code_snapshot = snapshot
                     return False
                 tp = result.get("tests_passed", 0)
                 tt = result.get("tests_total", 0)

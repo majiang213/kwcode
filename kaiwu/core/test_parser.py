@@ -145,3 +145,181 @@ def parse_test_failures(output: str) -> list[dict]:
             failures.append(failure)
 
     return failures[:10]  # 最多10个，避免prompt过长
+
+
+def extract_fault_functions(test_output: str, source_files: list[str] = None) -> list[dict]:
+    """
+    从pytest stack trace中确定性提取故障函数（文件+函数名+行号）。
+
+    pytest --tb=short 格式:
+        scheduler.py:47: in complete_task
+            self.tasks[task_id].status = TaskStatus.COMPLETED
+
+    返回: [{"file": "scheduler.py", "function": "complete_task", "line": 47}]
+    去重，按出现频率排序（出现越多=越可能是bug所在）。
+    """
+    if not test_output:
+        return []
+
+    import os
+
+    # 标准化source_files为basename集合
+    source_basenames = set()
+    if source_files:
+        source_basenames = {os.path.basename(f) for f in source_files}
+
+    # 从stack trace中提取所有 "file.py:line: in function" 帧
+    # pytest --tb=short格式: "file.py:42: in func_name"
+    pattern = r'([\w/\\._-]+\.py):(\d+):\s+in\s+(\w+)'
+    all_frames = re.findall(pattern, test_output)
+
+    # 过滤：只保留源文件帧（排除test文件和标准库）
+    fault_counts = {}  # (file, function, line) -> count
+    for fpath, line_str, func_name in all_frames:
+        basename = os.path.basename(fpath)
+        # 排除test文件
+        if 'test' in basename.lower():
+            continue
+        # 排除标准库/site-packages
+        if '/lib/python' in fpath or '/site-packages/' in fpath:
+            continue
+        # 如果指定了source_files，只保留匹配的
+        if source_basenames and basename not in source_basenames:
+            continue
+        # 排除常见框架函数
+        if func_name in ('__init__', '__str__', '__repr__', '<module>'):
+            continue
+
+        key = (basename, func_name, int(line_str))
+        fault_counts[key] = fault_counts.get(key, 0) + 1
+
+    # 按出现频率排序（出现越多=越可能是bug所在）
+    sorted_faults = sorted(fault_counts.items(), key=lambda x: -x[1])
+
+    results = []
+    seen_funcs = set()
+    for (file, function, line), count in sorted_faults:
+        # 去重：同一个函数只保留一次（取出现最多的行号）
+        if (file, function) in seen_funcs:
+            continue
+        seen_funcs.add((file, function))
+        results.append({
+            "file": file,
+            "function": function,
+            "line": line,
+            "count": count,
+        })
+
+    # 补充：从测试断言中提取被测函数（ROOT CAUSE优先于crash location）
+    test_called_funcs = set()
+    lines = test_output.split("\n")
+    for i, line in enumerate(lines):
+        if 'test' in line and '.py:' in line and ': in ' in line:
+            if i + 1 < len(lines):
+                code_line = lines[i + 1].strip()
+                calls = re.findall(r'(\w+)\s*\(', code_line)
+                skip_funcs = {'assert', 'len', 'abs', 'isinstance', 'hasattr', 'print',
+                             'str', 'int', 'float', 'list', 'dict', 'set', 'tuple',
+                             'range', 'enumerate', 'zip', 'sorted', 'sum', 'min', 'max'}
+                for c in calls:
+                    if c not in skip_funcs and not c.startswith('test_'):
+                        test_called_funcs.add(c)
+
+    # 将test_called_funcs中的函数提升到结果最前面（ROOT CAUSE优先）
+    if test_called_funcs and results:
+        root_cause = [r for r in results if r["function"] in test_called_funcs]
+        others = [r for r in results if r["function"] not in test_called_funcs]
+        results = root_cause + others
+
+    return results[:10]  # 最多10个
+
+
+def attribute_failures_to_files(test_output: str, source_files: list[str]) -> dict[str, list[str]]:
+    """
+    失败测试归因：从pytest traceback中判断每个失败测试属于哪个源文件。
+
+    原理：pytest --tb=short 的traceback格式：
+        _____ TestFoo.test_bar _____
+        test_foo.py:42: in test_bar
+            result = my_module.do_something()
+        my_module.py:15: in do_something    ← 源文件帧
+            return self._helper()
+        E   AssertionError: assert 5 == -5
+
+    从traceback中找到source_files中的文件帧，按源文件分组。
+
+    Args:
+        test_output: pytest完整输出（含FAILURES块）
+        source_files: 源文件列表（不含test文件），如 ['scheduler.py', 'worker.py']
+
+    Returns:
+        {source_file: [该文件相关的失败测试snippet列表]}
+        未归因的测试放在 '__unattributed__' key下
+    """
+    if not test_output or not source_files:
+        return {}
+
+    # 标准化source_files为basename（去掉路径前缀）
+    import os
+    basenames = {os.path.basename(f): f for f in source_files}
+
+    result = {f: [] for f in source_files}
+    result['__unattributed__'] = []
+
+    # 按FAILURES section分割每个测试块
+    blocks = re.split(r'_{3,}\s+([\w:.]+)\s+_{3,}', test_output)
+
+    i = 1
+    while i < len(blocks) - 1:
+        test_name = blocks[i].strip()
+        block = blocks[i + 1] if i + 1 < len(blocks) else ""
+        i += 2
+
+        # 构建该测试的snippet（测试名 + E行）
+        e_lines = re.findall(r'^E\s+(.+)$', block, re.MULTILINE)
+        snippet = f"FAILED {test_name}\n" + "\n".join(e_lines[:5])
+
+        # 从traceback中找源文件帧
+        # 格式: "filename.py:line: in function_name"
+        frames = re.findall(r'([\w/\\._-]+\.py):(\d+):\s+in\s+(\w+)', block)
+
+        attributed = False
+        for frame_file, frame_line, frame_func in reversed(frames):
+            # 从后往前找（最接近错误的帧优先）
+            frame_basename = os.path.basename(frame_file)
+            if frame_basename in basenames and 'test' not in frame_basename.lower():
+                target = basenames[frame_basename]
+                result[target].append(snippet)
+                attributed = True
+                break
+
+        if not attributed:
+            # 没有在traceback中找到源文件帧，尝试从E行中找文件引用
+            for basename, full_path in basenames.items():
+                if basename in block and 'test' not in basename.lower():
+                    result[full_path].append(snippet)
+                    attributed = True
+                    break
+
+        if not attributed:
+            result['__unattributed__'].append(snippet)
+
+    # 如果block分割没找到任何结果，用FAILED行做简单归因
+    if all(len(v) == 0 for v in result.values()):
+        for match in re.finditer(r'FAILED\s+([\w/:.]+)\s*-\s*(.+)', test_output):
+            test_name = match.group(1)
+            reason = match.group(2).strip()
+            snippet = f"FAILED {test_name} - {reason}"
+            # 尝试从test_name或reason中找源文件线索
+            attributed = False
+            for basename, full_path in basenames.items():
+                module_name = basename.replace('.py', '')
+                if module_name in test_name.lower() or module_name in reason.lower():
+                    result[full_path].append(snippet)
+                    attributed = True
+                    break
+            if not attributed:
+                result['__unattributed__'].append(snippet)
+
+    # 清理空列表
+    return {k: v for k, v in result.items() if v}

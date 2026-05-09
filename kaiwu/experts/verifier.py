@@ -170,10 +170,7 @@ class VerifierExpert:
             if patch.get("write_mode") == "whole_file":
                 content = patch.get("content", "") or patch.get("modified", "")
                 try:
-                    os.makedirs(os.path.dirname(fpath) if os.path.dirname(fpath) else ".", exist_ok=True)
-                    with open(fpath, "w", encoding="utf-8") as f:
-                        f.write(content)
-                    success = True
+                    success = self.tools.write_file(fpath, content)
                 except Exception as e:
                     logger.error("whole_file write failed for %s: %s", fpath, e)
                     success = False
@@ -252,7 +249,16 @@ class VerifierExpert:
                 test_error = f"发现{len(test_files)}个测试文件但测试未执行，请检查测试路径"
 
         if not passed:
-            self._rollback(backups)
+            # 关键决策：测试部分通过时不回滚，保留进展让orchestrator管理
+            # 只在以下情况回滚：语法错误、0个测试通过、或测试通过数比初始更少
+            initial_passed = getattr(ctx, '_pre_test_passed', 0)
+            should_rollback = (
+                not syntax_ok or  # 语法错误必须回滚
+                (tests_total > 0 and tests_passed == 0) or  # 全部失败回滚
+                (tests_total > 0 and tests_passed < initial_passed)  # 退步回滚
+            )
+            if should_rollback:
+                self._rollback(backups)
             # WRONG_FILE确定性检测
             if self._detect_wrong_file(ctx, test_error):
                 error_info = {
@@ -492,8 +498,9 @@ class VerifierExpert:
                 return passed, total, ""
             else:
                 passed, total = self._parse_test_output(output, project_lang)
-                error = stderr.strip() or stdout.strip()
-                return passed, total, error[:2000]
+                # 合并stdout和stderr，确保测试失败详情不丢失
+                error = (stdout.strip() + "\n" + stderr.strip()).strip()
+                return passed, total, error[-3000:]
 
         return 0, 0, ""
 
