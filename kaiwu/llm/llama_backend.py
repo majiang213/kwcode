@@ -9,6 +9,13 @@ import os
 import re
 from typing import Optional
 
+# 在模块加载时设置NO_PROXY，确保httpx不会把localhost请求走系统代理
+# 这必须在import httpx之前或httpx.Client创建之前生效
+_no_proxy = os.environ.get('NO_PROXY', '')
+if 'localhost' not in _no_proxy:
+    os.environ['NO_PROXY'] = f"{_no_proxy},localhost,127.0.0.1" if _no_proxy else "localhost,127.0.0.1"
+    os.environ['no_proxy'] = os.environ['NO_PROXY']
+
 import httpx
 
 from kaiwu.core.network import is_china_network
@@ -36,7 +43,9 @@ class LLMBackend:
     # Models known to use thinking/reasoning tokens that consume num_predict budget
     REASONING_PREFIXES = ("deepseek-r1", "qwq", "qwen3", "gemma4")
     # Multiplier for num_predict when using reasoning models
+    # 8b模型thinking较短，用3x；大模型用8x
     REASONING_TOKEN_MULTIPLIER = 8
+    REASONING_TOKEN_MULTIPLIER_SMALL = 3  # for <=8b models
 
     # ModelScope model mapping for China network auto-switching
     MODELSCOPE_MODELS = {
@@ -68,6 +77,8 @@ class LLMBackend:
         self._last_elapsed: float = 0.0  # last generate elapsed seconds
         # Detect if this is an OpenAI-compatible API (not Ollama)
         self._is_openai_compat = self._detect_openai_compat(ollama_url)
+        # 对localhost/127.0.0.1的请求创建无代理的httpx client（避免系统代理干扰）
+        self._http_client = self._create_http_client(ollama_url)
         # Token budget tracking
         self._total_input_tokens: int = 0
         self._total_output_tokens: int = 0
@@ -97,6 +108,19 @@ class LLMBackend:
             logger.info("LLM backend: OpenAI-compatible HTTP (%s, model=%s)", self.ollama_url, self.ollama_model)
         else:
             logger.info("LLM backend: Ollama HTTP (%s, model=%s)", self.ollama_url, self.ollama_model)
+
+    @staticmethod
+    def _create_http_client(url: str):
+        """对localhost请求创建无代理httpx client，避免系统代理干扰ollama调用。"""
+        import os
+        url_lower = url.lower()
+        if "localhost" in url_lower or "127.0.0.1" in url_lower:
+            # 确保NO_PROXY包含localhost（httpx会读取这个环境变量）
+            no_proxy = os.environ.get('NO_PROXY', '')
+            if 'localhost' not in no_proxy:
+                os.environ['NO_PROXY'] = f"{no_proxy},localhost,127.0.0.1" if no_proxy else "localhost,127.0.0.1"
+                os.environ['no_proxy'] = os.environ['NO_PROXY']
+        return httpx.Client(timeout=600.0)
 
     @staticmethod
     def _detect_openai_compat(url: str) -> bool:
@@ -328,7 +352,11 @@ class LLMBackend:
         effective_temp = temperature
 
         if self._is_reasoning:
-            effective_tokens = max_tokens * self.REASONING_TOKEN_MULTIPLIER
+            # 8b及以下模型thinking较短，用小multiplier避免超时
+            multiplier = self.REASONING_TOKEN_MULTIPLIER
+            if any(s in self.ollama_model.lower() for s in ('1b', '3b', '4b', '7b', '8b')):
+                multiplier = self.REASONING_TOKEN_MULTIPLIER_SMALL
+            effective_tokens = max_tokens * multiplier
             if temperature == 0.0:
                 effective_temp = 0.01
 
@@ -347,10 +375,10 @@ class LLMBackend:
             payload["options"]["stop"] = stop
 
         try:
-            resp = httpx.post(
+            resp = self._http_client.post(
                 f"{self.ollama_url}/api/chat",
                 json=payload,
-                timeout=360.0,
+                timeout=600.0,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -410,7 +438,7 @@ class LLMBackend:
             payload["stop"] = stop
 
         try:
-            resp = httpx.post(url, json=payload, headers=headers, timeout=360.0)
+            resp = self._http_client.post(url, json=payload, headers=headers, timeout=360.0)
             resp.raise_for_status()
             data = resp.json()
             choices = data.get("choices", [])

@@ -10,13 +10,13 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://python.org)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Mac%20%7C%20Linux-lightgrey.svg)]()
 [![Multi-Platform Tests](https://github.com/val1813/kwcode/actions/workflows/test.yml/badge.svg)](https://github.com/val1813/kwcode/actions/workflows/test.yml)
-[![Version](https://img.shields.io/badge/Version-1.7.0-blue.svg)]()
+[![Version](https://img.shields.io/badge/Version-2.0.0-blue.svg)]()
 
 </div>
 
 ---
 
-> **v1.7.0 已发布！** KAIJU架构借鉴：Generator bounded context + 存根任务sub-task decomposition + DetailedLogger完整流水线日志。安装命令：
+> **v2.0.0 已发布！** Eval驱动架构升级：自适应采样 + 调用关系传递(usage_finder) + 多bug逐类拆解(bug_decomposed) + 新文件创建 + 工程约束注入 + bench诊断报告系统。Eval通过率 0%→20%(3/15 PASS)，总测试通过数 294→377(+28%)。安装命令：
 >
 > ```bash
 > pip install kwcode
@@ -30,6 +30,9 @@
 
 | 日期 | 内容 |
 |------|------|
+| 05-09 | **v2.0.0** Eval驱动架构升级：自适应采样(大文件1次/小文件3次) + usage_finder调用关系传递 + bug_decomposed多bug逐类拆解 + 新文件创建(_maybe_create_missing_module) + 工程约束注入(_detect_engineering_hints) + bench诊断报告系统(bench_diagnose.py) + 3个失败测试清理 + Eval 0%→20%(3/15 PASS, +83 tests) |
+| 05-08 | **v1.9.0** 工程消化反馈：execution_feedback内循环(改完立即跑测试看结果) + 小模型自适应(8b以下只采1次) + 结构化诊断句生成(generate_diagnosis) + 精确失败归因(attribute_failures_to_files) |
+| 05-07 | **v1.8.0** 21项修复：whole_file_refactor + targeted_fix + fault_functions定位 + regression_guard + checkpoint不覆盖 + syntax免费重试 + error[-3000:]取末尾 + CJK截断 |
 | 05-07 | **v1.7.0** KAIJU架构借鉴：Generator bounded context(只传当前函数+相关测试) + 存根任务sub-task decomposition(逐函数独立实现) + DetailedLogger完整流水线日志(不截断LLM输入输出) + OpenAI兼容API检测修复(kaiwu部署器兼容) |
 | 05-07 | **v1.6.2** 执行反馈深度升级：结构化测试失败解析(parse_test_failures) + TraceCoder历史教训累积(attempt_history) + whole_file写入修复(存根任务不再patches=0) + 完整审计日志(llm_calls/node_io) + pytest -v详细输出 |
 | 05-07 | **v1.6.1** 架构收敛：删除WholeFileImplExpert/DependencyFixExpert，纯确定性机制驱动pipeline。Generator增强(upstream_constraints注入system prompt + retry_hint携带上次代码 + tier=small填空框架)。License改为Apache-2.0。513 tests green |

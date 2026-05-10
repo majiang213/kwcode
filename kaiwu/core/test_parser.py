@@ -355,10 +355,16 @@ def generate_diagnosis(structured_failures: list[dict]) -> str:
         loc = f" ({file}:{line_no})" if file and line_no else ""
 
         if error_type == 'AssertionError' and expected and actual:
-            # 最精确的情况：知道期望和实际
-            lines.append(
-                f"- {name}{loc}: 应该返回 {expected}，实际返回 {actual}"
-            )
+            # 最精确的情况：知道期望和实际，尝试推断根因
+            root_cause = _infer_root_cause(expected, actual, name)
+            if root_cause:
+                lines.append(
+                    f"- {name}{loc}: 应该返回 {expected}，实际返回 {actual}（{root_cause}）"
+                )
+            else:
+                lines.append(
+                    f"- {name}{loc}: 应该返回 {expected}，实际返回 {actual}"
+                )
         elif error_type == 'AttributeError':
             lines.append(
                 f"- {name}{loc}: {snippet[:120]}（对象缺少该属性或方法）"
@@ -399,3 +405,49 @@ def generate_diagnosis(structured_failures: list[dict]) -> str:
             lines.append(f"- {name}: 测试失败（无详细信息）")
 
     return "\n".join(lines)
+
+
+def _infer_root_cause(expected: str, actual: str, test_name: str) -> str:
+    """
+    从expected/actual的差异推断根因。确定性工程逻辑，不是写死答案。
+    返回空字符串表示无法推断。
+    """
+    exp_lower = expected.lower()
+    act_lower = actual.lower()
+    name_lower = test_name.lower()
+
+    # 转义字符相关：actual中有反斜杠但expected中没有，或反之
+    if '\\' in actual and '\\' not in expected:
+        return "转义字符未被正确处理，反斜杠应该触发转义逻辑"
+    if '\\' in expected and '\\' not in actual:
+        return "反斜杠被错误消耗，转义后的字面量丢失"
+
+    # 引号相关：expected有引号但actual在引号处截断
+    if ('"' in expected or "'" in expected) and len(actual) < len(expected):
+        if 'escape' in name_lower or 'quote' in name_lower:
+            return "引号转义未处理，遇到转义引号时应继续解析而非结束字符串"
+
+    # 负数/符号相关：符号相反
+    try:
+        exp_num = float(expected)
+        act_num = float(actual)
+        if exp_num == -act_num:
+            return "符号取反错误，检查负号/unary minus的处理逻辑"
+        if exp_num < 0 and act_num > 0:
+            return "负数未被正确处理，需要支持unary minus"
+    except (ValueError, TypeError):
+        pass
+
+    # None vs 有值：函数返回了None
+    if act_lower in ('none', 'null') and exp_lower not in ('none', 'null'):
+        return "函数返回了None，可能缺少return语句或逻辑分支未覆盖"
+
+    # 空列表/空字符串 vs 有内容
+    if act_lower in ('[]', '""', "''", '{}') and exp_lower not in ('[]', '""', "''", '{}'):
+        return "返回了空结果，核心逻辑可能未执行"
+
+    # 截断：actual是expected的前缀
+    if expected.startswith(actual) and len(actual) < len(expected):
+        return "结果被截断，解析/处理提前终止了"
+
+    return ""

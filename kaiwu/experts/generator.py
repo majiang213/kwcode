@@ -1619,10 +1619,15 @@ class GeneratorExpert:
                 continue
 
             # 自适应：大文件只采1次，避免超时
+            # 8b及以下模型：统一只采1次（reasoning token消耗大，多采样会超时）
             file_lines = len(content.split('\n'))
-            if file_lines > 150:
+            is_small_model = hasattr(self.llm, 'ollama_model') and any(
+                s in getattr(self.llm, 'ollama_model', '').lower()
+                for s in ('1b', '3b', '4b', '7b', '8b')
+            )
+            if is_small_model or file_lines > 150:
                 max_tokens = 2048
-                temperatures = [0.0]  # 大文件只采1次，省时间给retry
+                temperatures = [0.0]  # 小模型/大文件只采1次
             else:
                 max_tokens = 4096
                 temperatures = [0.0, 0.2, 0.4]
@@ -1802,7 +1807,11 @@ class GeneratorExpert:
             # 选出最佳候选后，立刻运行failing tests看结果
             # 如果还有失败，把结构化诊断给LLM再生成一次（最多1轮额外尝试）
             # 解决阻碍3（改完不知道结果）和阻碍4（每次从同一起点出发）
-            code = self._run_execution_feedback(ctx, fpath, content, code, system, max_tokens)
+            # 小模型用轻量版（timeout短、只跑2个failing tests）
+            if is_small_model:
+                code = self._run_execution_feedback_lite(ctx, fpath, content, code, system, max_tokens)
+            else:
+                code = self._run_execution_feedback(ctx, fpath, content, code, system, max_tokens)
 
             patches.append({
                 "file": fpath,
@@ -1906,6 +1915,44 @@ class GeneratorExpert:
                 pass
 
         # 第二轮没有改善，恢复原始文件，返回第一轮的代码
+        self.tools.write_file(fpath, original)
+        return code
+
+    def _run_execution_feedback_lite(self, ctx, fpath: str, original: str, code: str,
+                                     system: str, max_tokens: int) -> str:
+        """
+        轻量版Execution Feedback：小模型专用。
+        只跑最多2个failing tests，timeout 15s，不做第二轮LLM生成。
+        目的：快速检测是否引入了新bug，如果引入则回滚。
+        """
+        if not self.tools:
+            return code
+
+        # 写入候选代码，跑测试
+        self.tools.write_file(fpath, code)
+        from kaiwu.core.context import TaskContext as _TC
+        from kaiwu.experts.verifier import VerifierExpert as _VE
+        _tmp_ctx = _TC(project_root=ctx.project_root)
+        _tmp_ver = _VE(self.llm, self.tools)
+        _result = _tmp_ver.run_tests_only(_tmp_ctx)
+
+        test_output = _result.get("output", "")
+        passed = _result.get("passed", 0)
+        total = _result.get("total", 0)
+        pre_passed = getattr(ctx, '_pre_test_passed', 0)
+
+        # 如果全部通过或比初始状态好，直接返回
+        if (passed == total and total > 0) or passed > pre_passed:
+            self.tools.write_file(fpath, original)
+            return code
+
+        # 如果退步了（比初始状态还差），回滚到原始代码
+        if passed < pre_passed:
+            logger.info("[feedback_lite] 退步(%d < %d)，回滚", passed, pre_passed)
+            self.tools.write_file(fpath, original)
+            return original  # 回滚到原始代码
+
+        # 持平或无法判断，保留候选
         self.tools.write_file(fpath, original)
         return code
 

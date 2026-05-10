@@ -4,6 +4,41 @@ All notable changes to KWCode are documented here.
 
 ---
 
+## [2.0.0] - 2026-05-10
+
+### Eval驱动架构升级：数据说话，量化验证每个改动
+
+**核心成果**：Eval通过率 0%→20%（3/15 PASS），总测试通过数 294→377（+83, +28%）
+
+#### Added
+
+- **usage_finder调用关系传递**（`kaiwu/core/usage_finder.py`）：AST确定性找到所有函数调用点，注入prompt让LLM知道修改函数签名时需要同步更新哪些调用方
+- **多bug逐类拆解**（`_run_bug_decomposed()`）：多bug任务按TestClass分组，每组独立LLM调用+验证，累积修复不退步。解决"200行14个bug一次全修"的工作记忆溢出问题
+- **新文件创建**（`_maybe_create_missing_module()`）：检测ModuleNotFoundError/ImportError，自动创建缺失模块文件并加入locator处理队列
+- **工程约束注入**（`_detect_engineering_hints()`）：检测通用工程模式（循环引用保护、递归深度限制、短路求值）并注入prompt，不是背题而是通用约束
+- **自适应采样**：大文件(>150行)只采1次(temp=0.0)避免超时，小文件保持3次异构采样(0.0/0.2/0.4)
+- **bench诊断报告系统**（`bench_diagnose.py`）：从DetailedLogger日志中提取"脉搏"级诊断——attempt delta、prompt注入检测、机制触发统计、时间分布、LLM输出质量
+
+#### Changed
+
+- **targeted_fix恢复whole_file模式**：diff格式实验证明对32B模型弊大于利（算行号太慢导致超时），回滚为whole_file输出
+- **异构采样自适应**：根据文件大小动态选择采样策略，大文件省时间给retry
+
+#### Removed
+
+- 3个过时的search触发测试（search机制已在v1.8中移除，测试未同步清理）
+
+#### Eval实验记录
+
+| 实验 | 假设 | 结果 | 结论 |
+|------|------|------|------|
+| unified diff格式 | 减少token提高精度 | t21超时，t05/t13持平 | 32B算行号太慢，已回滚 |
+| 自适应采样 | 大文件降低采样避免超时 | t21不超时但41/49(退步) | 采样次数↓=尝试多样性↓ |
+| usage_finder | 调用关系帮助rename | t08仍0/26 | LLM仍不会全局rename |
+| bug_decomposed | 逐类修复提高命中 | t15有ctx bug导致退步 | bug已修，机制本身有效(52/54) |
+
+---
+
 ## [1.9.0] - 2026-05-09
 
 ### 9项架构优化：从"LLM看不懂反馈"到"工程替LLM消化反馈"
